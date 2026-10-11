@@ -15,6 +15,11 @@
 				goto('/workspace/tools', { replaceState: true });
 			} else if ($user?.permissions?.workspace?.skills) {
 				goto('/workspace/skills', { replaceState: true });
+			} else if (
+				$config?.features?.enable_character_cards &&
+				$user?.permissions?.workspace?.lorebooks
+			) {
+				goto('/workspace/lorebooks', { replaceState: true });
 			} else {
 				goto('/', { replaceState: true });
 			}

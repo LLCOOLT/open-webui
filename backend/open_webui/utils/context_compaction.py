@@ -47,8 +47,10 @@ async def compact_messages_for_request(
     model_id: str,
     models: dict,
     system_prompt: str = '',
+    overrides: dict | None = None,
 ) -> tuple[list[dict], str | None, bool]:
-    config = await _load_config()
+    # ``overrides`` replaces the global settings for one chat (character chats use their own memory settings).
+    config = {**await _load_config(), **(overrides or {})}
     if not config['enable']:
         return messages, None, False
 
@@ -147,8 +149,12 @@ async def compact_messages_for_request(
     return [*system_messages, *recent_messages], summary, True
 
 
-async def compact_chat_branch(request, user, chat: Any, model_id: str, models: dict) -> dict:
-    config = await _load_config()
+async def compact_chat_branch(
+    request, user, chat: Any, model_id: str, models: dict, overrides: dict | None = None, keep_recent: bool = False
+) -> dict:
+    """Summarize the current branch now. By default only the last message stays verbatim; with
+    ``keep_recent`` the usual retention share of recent messages does (as automatic compaction keeps)."""
+    config = {**await _load_config(), **(overrides or {})}
     if not config['enable']:
         return {'ok': True, 'compacted': False, 'reason': 'disabled'}
 
@@ -167,8 +173,9 @@ async def compact_chat_branch(request, user, chat: Any, model_id: str, models: d
         messages_map = history.get('messages') or {}
 
     messages, previous_summary = _apply_latest_summary_checkpoint(get_message_list(messages_map, current_id))
-    compacted_messages = messages[:-1]
-    recent_messages = messages[-1:]
+    boundary = _find_compaction_boundary(messages, config['retention_percentage']) if keep_recent else -1
+    compacted_messages = messages[:boundary]
+    recent_messages = messages[boundary:]
     if not compacted_messages or not recent_messages:
         return {'ok': True, 'compacted': False, 'reason': 'too_short'}
 
@@ -182,13 +189,19 @@ async def compact_chat_branch(request, user, chat: Any, model_id: str, models: d
         previous_summary,
         config['prompt_template'],
     )
+    # Stored messages may omit their own 'id'; the map key is authoritative.
+    checkpoint_id = recent_messages[0].get('id') or next(
+        (key for key, message in messages_map.items() if message is recent_messages[0]), current_id
+    )
     await Chats.upsert_message_to_chat_by_id_and_message_id(
-        chat.id, current_id, {'contextSummary': summary}, touch=False
+        chat.id, checkpoint_id, {'contextSummary': summary}, touch=False
     )
 
     return {
         'ok': True,
         'compacted': True,
+        'checkpoint_message_id': checkpoint_id,
+        'summary': summary,
         'dropped_messages': len(compacted_messages),
         'kept_messages': len(recent_messages),
         'summary_chars': len(summary),

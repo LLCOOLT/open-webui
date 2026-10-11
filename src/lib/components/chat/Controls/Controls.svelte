@@ -8,8 +8,9 @@
 	import Valves from '$lib/components/chat/Controls/Valves.svelte';
 	import FileItem from '$lib/components/common/FileItem.svelte';
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
+	import Roleplay from '$lib/components/chat/Controls/Roleplay.svelte';
 
-	import { user, settings } from '$lib/stores';
+	import { config, user, settings } from '$lib/stores';
 	export let models = [];
 	export let chatFiles = [];
 	export let params = {};
@@ -28,6 +29,7 @@
 	let showValves = getOpen('valves', false);
 	let showSystemPrompt = getOpen('systemPrompt');
 	let showAdvancedParams = getOpen('advancedParams');
+	let showRoleplay = getOpen('roleplay', false);
 
 	const compactSectionButtonClass =
 		'w-full py-1 text-xs font-normal text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 transition cursor-pointer select-none';
@@ -124,6 +126,21 @@
 							rows="3"
 							placeholder={$i18n.t('Enter system prompt')}
 						/>
+					</div>
+				</Collapsible>
+			{/if}
+
+			{#if $config?.features?.enable_character_cards}
+				<Collapsible
+					title={$i18n.t('Roleplay')}
+					bind:open={showRoleplay}
+					onChange={setOpen('roleplay')}
+					buttonClassName={compactSectionButtonClass}
+					chevronClassName="size-2.5"
+					chevronStrokeWidth="2"
+				>
+					<div class="pt-1 pb-1" slot="content">
+						<Roleplay {models} />
 					</div>
 				</Collapsible>
 			{/if}

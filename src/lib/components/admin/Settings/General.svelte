@@ -340,6 +340,69 @@
 					<Switch bind:state={adminConfig.ENABLE_NOTES} ariaLabelledbyId={labelId} />
 				</AdminSettingRow>
 				<AdminSettingRow
+					label={$i18n.t('settings.admin.general.characterCards.label')}
+					description={$i18n.t('settings.admin.general.characterCards.description')}
+					let:labelId
+				>
+					<Switch bind:state={adminConfig.ENABLE_CHARACTER_CARDS} ariaLabelledbyId={labelId} />
+				</AdminSettingRow>
+				{#if adminConfig.ENABLE_CHARACTER_CARDS}
+					<AdminSettingField
+						label={$i18n.t('settings.admin.general.characterDefaultSystemPrompt.label')}
+						description={$i18n.t(
+							'settings.admin.general.characterDefaultSystemPrompt.description',
+							{
+								MACRO: '{{original}}'
+							}
+						)}
+					>
+						<Textarea
+							className={textareaClass}
+							bind:value={adminConfig.CHARACTER_DEFAULT_SYSTEM_PROMPT}
+						/>
+					</AdminSettingField>
+					<AdminSettingField
+						label={$i18n.t('settings.admin.general.characterOocPrompt.label')}
+						description={$i18n.t('settings.admin.general.characterOocPrompt.description')}
+					>
+						<Textarea className={textareaClass} bind:value={adminConfig.CHARACTER_OOC_PROMPT} />
+					</AdminSettingField>
+					<AdminSettingRow
+						label={$i18n.t('settings.admin.general.characterMemory.label')}
+						description={$i18n.t('settings.admin.general.characterMemory.description')}
+						let:labelId
+					>
+						<Switch bind:state={adminConfig.ENABLE_CHARACTER_MEMORY} ariaLabelledbyId={labelId} />
+					</AdminSettingRow>
+					{#if adminConfig.ENABLE_CHARACTER_MEMORY}
+						<AdminSettingField
+							label={$i18n.t('settings.admin.general.characterMemoryThreshold.label')}
+							description={$i18n.t('settings.admin.general.characterMemoryThreshold.description')}
+						>
+							<input
+								class={inputClass}
+								type="number"
+								min="1000"
+								step="1000"
+								bind:value={adminConfig.CHARACTER_MEMORY_TOKEN_THRESHOLD}
+							/>
+						</AdminSettingField>
+						<AdminSettingField
+							label={$i18n.t('settings.admin.general.characterMemoryPrompt.label')}
+							description={$i18n.t('settings.admin.general.characterMemoryPrompt.description', {
+								MACROS:
+									'{{char}}, {{user}}, {{PREVIOUS_SUMMARY}}, {{COMPACTED_MESSAGES}}, {{RECENT_MESSAGES}}'
+							})}
+						>
+							<Textarea
+								className={textareaClass}
+								placeholder={$i18n.t('Leave empty to use the default prompt')}
+								bind:value={adminConfig.CHARACTER_MEMORY_PROMPT}
+							/>
+						</AdminSettingField>
+					{/if}
+				{/if}
+				<AdminSettingRow
 					label={$i18n.t('settings.admin.general.channels.label')}
 					description={$i18n.t('settings.admin.general.channels.description')}
 					let:labelId

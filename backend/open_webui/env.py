@@ -851,6 +851,10 @@ MINERU_MAX_MARKDOWN_BYTES = (
     int(os.getenv('MINERU_MAX_MARKDOWN_BYTES')) if os.getenv('MINERU_MAX_MARKDOWN_BYTES') else None
 )
 
+# Upper bound for an imported character card (JSON, PNG or CHARX). For CHARX archives the limit
+# applies to both the upload and the total uncompressed size of its entries.
+CHARACTER_CARD_MAX_BYTES = int(os.getenv('CHARACTER_CARD_MAX_BYTES') or 50 * 1024 * 1024)
+
 # When enabled, skips pydub-based preprocessing (format conversion, compression,
 # and chunked splitting) before sending files to processing engines. Useful when
 # the upstream provider handles these steps or when ffmpeg is unavailable.

@@ -1783,6 +1783,14 @@ export interface ModelMeta {
 	capabilities?: object;
 	profile_image_url?: string;
 	background_image_url?: string | null;
+	// Display-only summary of a character model (see backend character_summary).
+	character?: {
+		name?: string;
+		nickname?: string | null;
+		creator?: string;
+		creator_notes?: string;
+		greeting_count?: number;
+	};
 }
 
 export interface ModelParams {}

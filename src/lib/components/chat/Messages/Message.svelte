@@ -95,7 +95,11 @@
 				{messageId}
 				{selectedModels}
 				isLastMessage={messageId === history.currentId}
-				siblings={history.messages[history.messages[messageId].parentId]?.childrenIds ?? []}
+				siblings={history.messages[messageId].parentId !== null
+					? (history.messages[history.messages[messageId].parentId]?.childrenIds ?? [])
+					: Object.values(history.messages)
+							.filter((message: any) => message.parentId === null)
+							.map((message: any) => message.id)}
 				{setInputText}
 				{gotoMessage}
 				{showPreviousMessage}

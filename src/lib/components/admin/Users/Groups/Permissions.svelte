@@ -227,6 +227,25 @@
 				</div>
 			{/if}
 		</div>
+
+		<div class="flex flex-col w-full">
+			<div class="flex w-full justify-between my-1">
+				<div class=" self-center text-xs font-normal">
+					{$i18n.t('Lorebooks Access')}
+				</div>
+				<Switch
+					bind:state={permissions.workspace.lorebooks}
+					ariaLabel={$i18n.t('Lorebooks Access')}
+				/>
+			</div>
+			{#if defaultPermissions?.workspace?.lorebooks && !permissions.workspace.lorebooks}
+				<div class="pb-0.5">
+					<div class="text-xs text-gray-500">
+						{$i18n.t('This is a default user permission and will remain enabled.')}
+					</div>
+				</div>
+			{/if}
+		</div>
 	</div>
 
 	<hr class=" border-gray-100/30 dark:border-gray-850/30" />
@@ -413,6 +432,46 @@
 					/>
 				</div>
 				{#if defaultPermissions?.sharing?.public_skills && !permissions.sharing.public_skills}
+					<div>
+						<div class="text-xs text-gray-500">
+							{$i18n.t('This is a default user permission and will remain enabled.')}
+						</div>
+					</div>
+				{/if}
+			</div>
+		{/if}
+
+		<div class="flex flex-col w-full">
+			<div class="flex w-full justify-between my-1">
+				<div class=" self-center text-xs font-normal">
+					{$i18n.t('Lorebooks Sharing')}
+				</div>
+				<Switch
+					bind:state={permissions.sharing.lorebooks}
+					ariaLabel={$i18n.t('Lorebooks Sharing')}
+				/>
+			</div>
+			{#if defaultPermissions?.sharing?.lorebooks && !permissions.sharing.lorebooks}
+				<div>
+					<div class="text-xs text-gray-500">
+						{$i18n.t('This is a default user permission and will remain enabled.')}
+					</div>
+				</div>
+			{/if}
+		</div>
+
+		{#if permissions.sharing.lorebooks}
+			<div class="flex flex-col w-full">
+				<div class="flex w-full justify-between my-1">
+					<div class=" self-center text-xs font-normal">
+						{$i18n.t('Lorebooks Public Sharing')}
+					</div>
+					<Switch
+						bind:state={permissions.sharing.public_lorebooks}
+						ariaLabel={$i18n.t('Lorebooks Public Sharing')}
+					/>
+				</div>
+				{#if defaultPermissions?.sharing?.public_lorebooks && !permissions.sharing.public_lorebooks}
 					<div>
 						<div class="text-xs text-gray-500">
 							{$i18n.t('This is a default user permission and will remain enabled.')}

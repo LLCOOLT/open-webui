@@ -44,6 +44,7 @@ from open_webui.utils.plugin import (
     get_function_module_from_cache,
     load_function_module_by_id,
 )
+from open_webui.utils.roleplay.filter import character_system_prompt_applied
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
@@ -294,7 +295,7 @@ async def generate_function_chat_completion(request, form_data, user, models: di
         if params:
             system = params.pop('system', None)
             form_data = apply_model_params_to_body_openai(params, form_data)
-            if not bypass_system_prompt:
+            if not bypass_system_prompt and not character_system_prompt_applied(request, model_info.id):
                 form_data = await apply_system_prompt_to_body(system, form_data, metadata, user)
 
     pipe_id = get_pipe_id(form_data)

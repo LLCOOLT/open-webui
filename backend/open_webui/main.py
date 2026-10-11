@@ -162,6 +162,7 @@ from open_webui.routers import (
     groups,
     images,
     knowledge,
+    lorebooks,
     memories,
     models,
     notes,
@@ -269,6 +270,7 @@ from open_webui.utils.oauth import (
 )
 from open_webui.utils.plugin import install_tool_and_function_dependencies
 from open_webui.utils.redis import get_redis_client
+from open_webui.utils.roleplay.character import character_summary
 from open_webui.utils.session_pool import cleanup_response, get_client_timeout, get_session, stream_wrapper
 from open_webui.utils.tool_approval import (
     ResolveToolCallForm,
@@ -860,6 +862,7 @@ app.include_router(users.router, prefix='/api/v1/users', tags=['users'])
 app.include_router(channels.router, prefix='/api/v1/channels', tags=['channels'])
 app.include_router(chats.router, prefix='/api/v1/chats', tags=['chats'])
 app.include_router(notes.router, prefix='/api/v1/notes', tags=['notes'])
+app.include_router(lorebooks.router, prefix='/api/v1/lorebooks', tags=['lorebooks'])
 
 
 app.include_router(models.router, prefix='/api/v1/models', tags=['models'])
@@ -912,12 +915,17 @@ async def get_models(request: Request, refresh: bool = False, user=Depends(get_v
     # models the caller can actually see.
     models = await get_filtered_models(models, user)
 
-    for model in models:
+    for index, model in enumerate(models):
         info = model.get('info') if isinstance(model.get('info'), dict) else {}
         meta = info.get('meta') if isinstance(info.get('meta'), dict) else {}
 
         # Remove profile image URL to reduce payload size
         meta.pop('profile_image_url', None)
+
+        if isinstance(meta.get('character'), dict):
+            # Copy: chat requests read the full character from the shared app-state entry.
+            meta = {**meta, 'character': character_summary(meta['character'])}
+            model = models[index] = {**model, 'info': {**info, 'meta': meta}}
 
         if 'tags' in meta:
             meta['tags'] = normalize_model_tags(meta['tags'])
@@ -1274,6 +1282,8 @@ async def chat_completion(
             'session_id': form_data.pop('session_id', None),
             'automation_id': automation_id,
             'folder_id': form_data.pop('folder_id', None),
+            # The user's own persona choice for this message (validated against their personas later).
+            'persona_id': form_data.pop('persona_id', None),
             'filter_ids': form_data.pop('filter_ids', []),
             'tool_ids': form_data.get('tool_ids', None),
             'tool_servers': tool_servers,
@@ -2269,6 +2279,7 @@ async def get_app_config(request: Request):
         'calendar.enable',
         'automations.enable',
         'notes.enable',
+        'characters.enable',
         'chat.context_compaction.enable',
         'chat.tool_permissions.enable',
         'web.search.enable',
@@ -2357,6 +2368,7 @@ async def get_app_config(request: Request):
                     'enable_calendar': config.get('calendar.enable'),
                     'enable_automations': config.get('automations.enable'),
                     'enable_notes': config.get('notes.enable'),
+                    'enable_character_cards': config.get('characters.enable'),
                     'enable_context_compaction': config.get('chat.context_compaction.enable'),
                     'enable_tool_permissions': config.get('chat.tool_permissions.enable'),
                     'enable_web_search': config.get('web.search.enable'),

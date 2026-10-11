@@ -44,6 +44,7 @@
 
 	import Name from './Name.svelte';
 	import ProfileImage from './ProfileImage.svelte';
+	import { characterExpressionUrl } from '$lib/apis/models';
 	import Image from '$lib/components/common/Image.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import RateComment from './RateComment.svelte';
@@ -73,6 +74,8 @@
 		model: string;
 		content: string;
 		output?: OutputItem[];
+		// Character expression picked for this reply (see Chat.svelte pickExpression).
+		expression?: string;
 		files?: { type: string; url: string }[];
 		timestamp: number;
 		role: string;
@@ -126,6 +129,14 @@
 	export let selectedModels = [];
 
 	let messageSource = history.messages[messageId];
+
+	// The expression picked for this reply (character models with expression images).
+	$: expressionName =
+		($settings?.characterExpressions ?? true) &&
+		message?.expression &&
+		((model as any)?.info?.meta?.character?.expressions ?? []).includes(message.expression)
+			? message.expression
+			: null;
 	let message: MessageType = structuredClone(messageSource);
 	$: if (history.messages) {
 		const source = history.messages[messageId];
@@ -149,6 +160,9 @@
 	}
 
 	export let siblings;
+
+	// Root assistant messages are character greetings (see Chat.svelte seedCharacterGreetings).
+	$: isGreeting = (message as any)?.parentId === null;
 
 	export let setInputText: Function = () => {};
 	export let gotoMessage: Function = () => {};
@@ -187,6 +201,10 @@
 	let model = null;
 	$: localizedModelName = model ? resolveLocalizedModelName(model, $i18n.language) : message.model;
 	$: model = $models.find((m) => m.id === message.model);
+	$: roleplayFormat =
+		($config?.features?.enable_character_cards ?? false) &&
+		($settings?.roleplayFormatting ?? true) &&
+		!!(model as any)?.info?.meta?.character;
 
 	$: statusEntries = message?.statusHistory ?? [...(message?.status ? [message?.status] : [])];
 	$: hasVisibleStatus =
@@ -675,8 +693,10 @@
 	>
 		<div class={`shrink-0 ltr:mr-2 rtl:ml-2 hidden @lg:flex mt-0.5 `}>
 			<ProfileImage
-				src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`}
-				className={'size-7 assistant-message-profile-image'}
+				src={expressionName
+					? characterExpressionUrl(model.id, expressionName)
+					: `${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`}
+				className={'size-7 assistant-message-profile-image object-top'}
 			/>
 		</div>
 
@@ -692,7 +712,7 @@
 			{/if}
 
 			<div>
-				<div class="chat-{message.role} w-full min-w-full">
+				<div class="chat-{message.role} w-full min-w-full" class:roleplay-format={roleplayFormat}>
 					<div>
 						{#if model?.info?.meta?.capabilities?.status_updates ?? true}
 							<StatusHistory statusHistory={message?.statusHistory} />
@@ -1329,7 +1349,7 @@
 										</Tooltip>
 									{/if}
 
-									{#if isLastMessage && ($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true))}
+									{#if isLastMessage && !isGreeting && ($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true))}
 										<Tooltip content={$i18n.t('Continue Response')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Continue Response')}
@@ -1366,7 +1386,8 @@
 										</Tooltip>
 									{/if}
 
-									{#if $user?.role === 'admin' || ($user?.permissions?.chat?.regenerate_response ?? true)}
+									<!-- A character greeting starts the chat; there is no prompt to regenerate it from. -->
+									{#if !isGreeting && ($user?.role === 'admin' || ($user?.permissions?.chat?.regenerate_response ?? true))}
 										{#if $settings?.regenerateMenu ?? true}
 											<button
 												type="button"
@@ -1653,6 +1674,23 @@
 {/key}
 
 <style>
+	.roleplay-format :global(em) {
+		color: var(--color-gray-500, #6b7280);
+	}
+
+	.roleplay-format :global(.rp-dialogue) {
+		color: var(--color-gray-900, #111827);
+		font-weight: 500;
+	}
+
+	:global(.dark) .roleplay-format :global(.rp-dialogue) {
+		color: var(--color-gray-50, #f9fafb);
+	}
+
+	:global(.dark) .roleplay-format :global(em) {
+		color: var(--color-gray-400, #9ca3af);
+	}
+
 	.buttons::-webkit-scrollbar {
 		display: none; /* for Chrome, Safari and Opera */
 	}

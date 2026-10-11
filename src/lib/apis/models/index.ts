@@ -444,3 +444,270 @@ export const deleteAllModels = async (token: string) => {
 
 	return res;
 };
+
+export const importCharacterCards = async (
+	token: string,
+	files: File[],
+	baseModelId: string,
+	isPublic: boolean = false
+) => {
+	const body = new FormData();
+	files.forEach((file) => body.append('files', file));
+	body.append('base_model_id', baseModelId);
+	body.append('public', isPublic ? 'true' : 'false');
+
+	const response = await fetch(`${WEBUI_API_BASE_URL}/models/characters/import`, {
+		method: 'POST',
+		headers: { authorization: `Bearer ${token}` },
+		body
+	});
+	if (!response.ok) throw await response.json();
+	return response.json();
+};
+
+export const exportCharacterCard = async (
+	token: string,
+	id: string,
+	format: 'png' | 'json' = 'png'
+): Promise<{ blob: Blob; filename: string; rawTruncated: boolean }> => {
+	const query = new URLSearchParams({ id, format });
+	const response = await fetch(`${WEBUI_API_BASE_URL}/models/model/character/export?${query}`, {
+		headers: { authorization: `Bearer ${token}` }
+	});
+	if (!response.ok) throw await response.json();
+
+	const disposition = response.headers.get('Content-Disposition') ?? '';
+	const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? `character.${format}`;
+	return {
+		blob: await response.blob(),
+		filename,
+		rawTruncated: response.headers.get('X-Character-Raw-Truncated') === 'true'
+	};
+};
+
+export const getCharacterGreetings = async (token: string, id: string): Promise<string[]> => {
+	const query = new URLSearchParams({ id });
+	const response = await fetch(`${WEBUI_API_BASE_URL}/models/model/character/greetings?${query}`, {
+		headers: { authorization: `Bearer ${token}` }
+	});
+	if (!response.ok) throw await response.json();
+	return response.json();
+};
+
+export const convertSystemPromptToCharacter = async (
+	token: string,
+	form: { system: string; name?: string; base_model_id?: string | null; use_ai?: boolean }
+): Promise<{ character: Record<string, any>; detected: string[]; method: 'parser' | 'ai' }> => {
+	const response = await fetch(`${WEBUI_API_BASE_URL}/models/characters/convert`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
+		body: JSON.stringify(form)
+	});
+	if (!response.ok) throw await response.json();
+	return response.json();
+};
+
+export type StoryCharacterDraft = {
+	name: string;
+	aliases: string[];
+	description: string;
+	personality: string;
+	mes_example: string;
+	first_mes: string;
+	creator_notes: string;
+	mentions: number;
+	selected: boolean;
+	detailed?: boolean;
+};
+
+export type StoryDraft = {
+	characters: StoryCharacterDraft[];
+	lorebook: { name: string; entries: Record<string, any>[] };
+	events: string[];
+	chunks: number;
+	failed_chunks: number;
+};
+
+const postJson = async (token: string, path: string, body: object) => {
+	const response = await fetch(`${WEBUI_API_BASE_URL}${path}`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
+		body: JSON.stringify(body)
+	});
+	if (!response.ok) throw await response.json().catch(() => response.statusText);
+	return response.json();
+};
+
+export const analyzeStory = (
+	token: string,
+	form: {
+		text: string;
+		title: string;
+		base_model_id: string;
+		analysis_model_id?: string | null;
+		detailed?: boolean;
+	}
+): Promise<StoryDraft> => postJson(token, '/models/characters/story/analyze', form);
+
+export const writeStoryProfile = (
+	token: string,
+	form: {
+		text: string;
+		title: string;
+		base_model_id: string;
+		analysis_model_id?: string | null;
+		character: object;
+	}
+): Promise<{ description: string; personality: string; mes_example: string }> =>
+	postJson(token, '/models/characters/story/profile', form);
+
+export const draftStoryGreeting = (
+	token: string,
+	form: { base_model_id: string; character: object; scenario: string }
+): Promise<{ first_mes: string }> => postJson(token, '/models/characters/story/greeting', form);
+
+export const createCharactersFromStory = (
+	token: string,
+	form: {
+		title: string;
+		base_model_id: string;
+		public: boolean;
+		scenario: string;
+		characters: object[];
+		lorebook: object | null;
+	}
+) => postJson(token, '/models/characters/story/create', form);
+
+export type CardSource = {
+	id: string;
+	name: string;
+	url: string;
+	searchable?: boolean;
+	supports_tags?: boolean;
+	result_tags?: boolean;
+};
+
+export type CardSummary = {
+	source: string;
+	id: string;
+	name: string;
+	tagline: string;
+	creator: string;
+	tags: string[];
+	image_url: string;
+	page_url: string;
+	nsfw: boolean;
+	has_lorebook: boolean | null;
+	tokens: number | null;
+	downloads: string;
+};
+
+export const getCardSources = async (token: string): Promise<CardSource[]> => {
+	const response = await fetch(`${WEBUI_API_BASE_URL}/models/characters/sources`, {
+		headers: { authorization: `Bearer ${token}` }
+	});
+	if (!response.ok) throw await response.json().catch(() => response.statusText);
+	return response.json();
+};
+
+export const searchCardSource = async (
+	token: string,
+	source: string,
+	params: {
+		q: string;
+		page: number;
+		sort: string;
+		nsfw: boolean;
+		tags?: string[];
+		exclude_tags?: string[];
+	},
+	signal?: AbortSignal
+): Promise<{ items: CardSummary[]; page: number; has_more: boolean }> => {
+	const query = new URLSearchParams({
+		q: params.q,
+		page: String(params.page),
+		sort: params.sort,
+		nsfw: String(params.nsfw),
+		tags: (params.tags ?? []).join(','),
+		exclude_tags: (params.exclude_tags ?? []).join(',')
+	});
+	const response = await fetch(
+		`${WEBUI_API_BASE_URL}/models/characters/sources/${encodeURIComponent(source)}/search?${query}`,
+		{ headers: { authorization: `Bearer ${token}` }, signal }
+	);
+	if (!response.ok) throw await response.json().catch(() => response.statusText);
+	return response.json();
+};
+
+export type CardPreview = {
+	name: string;
+	creator: string;
+	creator_notes: string;
+	description: string;
+	personality: string;
+	scenario: string;
+	first_mes: string;
+	alternate_greetings: string[];
+	mes_example: string;
+	system_prompt: string;
+	tags: string[];
+	lorebook_entries: number;
+	expressions: string[];
+	size: number;
+};
+
+export const previewCardFromSource = async (
+	token: string,
+	source: string,
+	id: string
+): Promise<CardPreview> => {
+	const response = await fetch(
+		`${WEBUI_API_BASE_URL}/models/characters/sources/${encodeURIComponent(source)}/card?id=${encodeURIComponent(id)}`,
+		{ headers: { authorization: `Bearer ${token}` } }
+	);
+	if (!response.ok) throw await response.json().catch(() => response.statusText);
+	return response.json();
+};
+
+export const importCardFromSource = (
+	token: string,
+	form: { source?: string; id?: string; url?: string; base_model_id: string; public: boolean }
+) => postJson(token, '/models/characters/sources/import', form);
+
+export const characterExpressionUrl = (modelId: string, name: string) =>
+	`${WEBUI_API_BASE_URL}/models/model/character/expression?id=${encodeURIComponent(modelId)}&name=${encodeURIComponent(name)}`;
+
+export const uploadCharacterExpressions = async (
+	token: string,
+	modelId: string,
+	files: File[]
+): Promise<{ expressions: string[]; skipped: string[] }> => {
+	const body = new FormData();
+	files.forEach((file) => body.append('files', file));
+	const response = await fetch(
+		`${WEBUI_API_BASE_URL}/models/model/character/expressions?id=${encodeURIComponent(modelId)}`,
+		{ method: 'POST', headers: { authorization: `Bearer ${token}` }, body }
+	);
+	if (!response.ok) throw await response.json().catch(() => response.statusText);
+	return response.json();
+};
+
+export const deleteCharacterExpression = async (
+	token: string,
+	modelId: string,
+	name: string
+): Promise<{ expressions: string[] }> => {
+	const response = await fetch(
+		`${WEBUI_API_BASE_URL}/models/model/character/expression?id=${encodeURIComponent(modelId)}&name=${encodeURIComponent(name)}`,
+		{ method: 'DELETE', headers: { authorization: `Bearer ${token}` } }
+	);
+	if (!response.ok) throw await response.json().catch(() => response.statusText);
+	return response.json();
+};
+
+export const classifyCharacterExpression = (
+	token: string,
+	modelId: string,
+	text: string
+): Promise<{ name: string | null }> =>
+	postJson(token, '/models/model/character/expression/classify', { model_id: modelId, text });

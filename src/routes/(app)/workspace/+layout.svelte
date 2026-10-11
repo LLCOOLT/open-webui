@@ -17,6 +17,7 @@
 	import { searchKnowledgeBases } from '$lib/apis/knowledge';
 	import { getPromptItems } from '$lib/apis/prompts';
 	import { getSkillItems } from '$lib/apis/skills';
+	import { getLorebooks } from '$lib/apis/lorebooks';
 	import { getToolList } from '$lib/apis/tools';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Sidebar from '$lib/components/icons/Sidebar.svelte';
@@ -53,8 +54,11 @@
 		const canViewTools =
 			$config?.features?.enable_plugins &&
 			($user?.role === 'admin' || $user?.permissions?.workspace?.tools);
+		const canViewLorebooks =
+			$config?.features?.enable_character_cards &&
+			($user?.role === 'admin' || $user?.permissions?.workspace?.lorebooks);
 
-		const [modelRes, knowledgeRes, promptRes, skillRes, toolRes] = await Promise.all([
+		const [modelRes, knowledgeRes, promptRes, skillRes, toolRes, lorebookRes] = await Promise.all([
 			canViewModels
 				? getModelItems(localStorage.token, null, null, null, null, null, 1).catch(() => null)
 				: null,
@@ -65,7 +69,8 @@
 				? getPromptItems(localStorage.token, null, null, null, null, null, 1).catch(() => null)
 				: null,
 			canViewSkills ? getSkillItems(localStorage.token, null, null, 1).catch(() => null) : null,
-			canViewTools ? getToolList(localStorage.token).catch(() => null) : null
+			canViewTools ? getToolList(localStorage.token).catch(() => null) : null,
+			canViewLorebooks ? getLorebooks(localStorage.token, '', 'write').catch(() => null) : null
 		]);
 
 		workspaceCounts.set({
@@ -73,7 +78,8 @@
 			knowledge: getCount(knowledgeRes),
 			prompts: getCount(promptRes),
 			skills: getCount(skillRes),
-			tools: getCount(toolRes)
+			tools: getCount(toolRes),
+			lorebooks: getCount(lorebookRes)
 		});
 	};
 
@@ -97,6 +103,11 @@
 			) {
 				goto('/', { replaceState: true });
 			} else if ($page.url.pathname.includes('/skills') && !$user?.permissions?.workspace?.skills) {
+				goto('/', { replaceState: true });
+			} else if (
+				$page.url.pathname.includes('/lorebooks') &&
+				(!$config?.features?.enable_character_cards || !$user?.permissions?.workspace?.lorebooks)
+			) {
 				goto('/', { replaceState: true });
 			}
 		}
@@ -229,6 +240,23 @@
 								<span>{$i18n.t('Tools')}</span>
 								<span class="text-sm opacity-60">
 									{formatCount($workspaceCounts.tools)}
+								</span>
+							</a>
+						{/if}
+
+						{#if $config?.features?.enable_character_cards && ($user?.role === 'admin' || $user?.permissions?.workspace?.lorebooks)}
+							<a
+								draggable="false"
+								aria-current={activeWorkspaceSection === 'lorebooks' ? 'page' : null}
+								class="min-w-fit px-1 text-sm inline-flex items-center gap-1 {activeWorkspaceSection ===
+								'lorebooks'
+									? 'text-gray-900 dark:text-gray-100'
+									: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+								href="/workspace/lorebooks"
+							>
+								<span>{$i18n.t('Lorebooks')}</span>
+								<span class="text-sm opacity-60">
+									{formatCount($workspaceCounts.lorebooks)}
 								</span>
 							</a>
 						{/if}

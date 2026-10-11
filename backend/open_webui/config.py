@@ -1750,6 +1750,10 @@ USER_PERMISSIONS_WORKSPACE_SKILLS_ACCESS = (
     os.getenv('USER_PERMISSIONS_WORKSPACE_SKILLS_ACCESS', 'False').lower() == 'true'
 )
 
+USER_PERMISSIONS_WORKSPACE_LOREBOOKS_ACCESS = (
+    os.getenv('USER_PERMISSIONS_WORKSPACE_LOREBOOKS_ACCESS', 'False').lower() == 'true'
+)
+
 USER_PERMISSIONS_WORKSPACE_MODELS_IMPORT = (
     os.getenv('USER_PERMISSIONS_WORKSPACE_MODELS_IMPORT', 'False').lower() == 'true'
 )
@@ -1782,6 +1786,14 @@ USER_PERMISSIONS_WORKSPACE_SKILLS_EXPORT = (
     os.getenv('USER_PERMISSIONS_WORKSPACE_SKILLS_EXPORT', 'False').lower() == 'true'
 )
 
+
+USER_PERMISSIONS_WORKSPACE_LOREBOOKS_ALLOW_SHARING = (
+    os.getenv('USER_PERMISSIONS_WORKSPACE_LOREBOOKS_ALLOW_SHARING', 'False').lower() == 'true'
+)
+
+USER_PERMISSIONS_WORKSPACE_LOREBOOKS_ALLOW_PUBLIC_SHARING = (
+    os.getenv('USER_PERMISSIONS_WORKSPACE_LOREBOOKS_ALLOW_PUBLIC_SHARING', 'False').lower() == 'true'
+)
 
 USER_PERMISSIONS_WORKSPACE_MODELS_ALLOW_SHARING = (
     os.getenv('USER_PERMISSIONS_WORKSPACE_MODELS_ALLOW_SHARING', 'False').lower() == 'true'
@@ -1944,6 +1956,7 @@ DEFAULT_USER_PERMISSIONS = {
         'prompts': USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS,
         'tools': USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS,
         'skills': USER_PERMISSIONS_WORKSPACE_SKILLS_ACCESS,
+        'lorebooks': USER_PERMISSIONS_WORKSPACE_LOREBOOKS_ACCESS,
         'models_import': USER_PERMISSIONS_WORKSPACE_MODELS_IMPORT,
         'models_export': USER_PERMISSIONS_WORKSPACE_MODELS_EXPORT,
         'prompts_import': USER_PERMISSIONS_WORKSPACE_PROMPTS_IMPORT,
@@ -1964,6 +1977,8 @@ DEFAULT_USER_PERMISSIONS = {
         'public_tools': USER_PERMISSIONS_WORKSPACE_TOOLS_ALLOW_PUBLIC_SHARING,
         'skills': USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_SHARING,
         'public_skills': USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_PUBLIC_SHARING,
+        'lorebooks': USER_PERMISSIONS_WORKSPACE_LOREBOOKS_ALLOW_SHARING,
+        'public_lorebooks': USER_PERMISSIONS_WORKSPACE_LOREBOOKS_ALLOW_PUBLIC_SHARING,
         'notes': USER_PERMISSIONS_NOTES_ALLOW_SHARING,
         'public_notes': USER_PERMISSIONS_NOTES_ALLOW_PUBLIC_SHARING,
         'folders': USER_PERMISSIONS_FOLDERS_ALLOW_SHARING,
@@ -2048,6 +2063,33 @@ AUTOMATION_MIN_INTERVAL = os.getenv('AUTOMATION_MIN_INTERVAL', '')
 AUTOMATION_AUTH_TOKEN_EXPIRES_IN = os.getenv('AUTOMATION_AUTH_TOKEN_EXPIRES_IN', '1h')
 
 ENABLE_NOTES = os.getenv('ENABLE_NOTES', 'True').lower() == 'true'
+
+ENABLE_CHARACTER_CARDS = os.getenv('ENABLE_CHARACTER_CARDS', 'True').lower() == 'true'
+
+# Used as {{original}} for character models when the user has no system prompt of their own.
+CHARACTER_DEFAULT_SYSTEM_PROMPT = os.getenv(
+    'CHARACTER_DEFAULT_SYSTEM_PROMPT',
+    "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. "
+    "Stay in character, write only {{char}}'s actions and dialogue, and never speak or act for {{user}}.",
+)
+
+# Replaces the character prompt for a message the user marks as out of character (OOC).
+CHARACTER_OOC_PROMPT = os.getenv(
+    'CHARACTER_OOC_PROMPT',
+    '{{user}} is speaking out of character: to you as the storyteller, not to {{char}}. Answer plainly '
+    'about the story, the characters or the roleplay itself, and do not continue the roleplay in this reply.',
+)
+
+# Long-chat memory for character chats: older messages are summarized into a story memory once the
+# chat passes this many (estimated) tokens. Separate from general context compaction, so it can stay
+# on, at a size that suits roleplay models, while compaction is off.
+ENABLE_CHARACTER_MEMORY = os.getenv('ENABLE_CHARACTER_MEMORY', 'True').lower() == 'true'
+try:
+    CHARACTER_MEMORY_TOKEN_THRESHOLD = int(os.getenv('CHARACTER_MEMORY_TOKEN_THRESHOLD', '12000'))
+except ValueError:
+    CHARACTER_MEMORY_TOKEN_THRESHOLD = 12000
+# Empty uses the built-in story memory prompt.
+CHARACTER_MEMORY_PROMPT = os.getenv('CHARACTER_MEMORY_PROMPT', '')
 
 ENABLE_USER_STATUS = os.getenv('ENABLE_USER_STATUS', 'True').lower() == 'true'
 
@@ -3116,6 +3158,12 @@ DEFAULT_CONFIG = {
     'automations.min_interval': AUTOMATION_MIN_INTERVAL,
     'automations.auth_token_expires_in': AUTOMATION_AUTH_TOKEN_EXPIRES_IN,
     'notes.enable': ENABLE_NOTES,
+    'characters.enable': ENABLE_CHARACTER_CARDS,
+    'characters.default_system_prompt': CHARACTER_DEFAULT_SYSTEM_PROMPT,
+    'characters.ooc_prompt': CHARACTER_OOC_PROMPT,
+    'characters.memory.enable': ENABLE_CHARACTER_MEMORY,
+    'characters.memory.token_threshold': CHARACTER_MEMORY_TOKEN_THRESHOLD,
+    'characters.memory.prompt': CHARACTER_MEMORY_PROMPT,
     'users.enable_status': ENABLE_USER_STATUS,
     'evaluation.arena.enable': ENABLE_EVALUATION_ARENA_MODELS,
     'evaluation.arena.models': EVALUATION_ARENA_MODELS,

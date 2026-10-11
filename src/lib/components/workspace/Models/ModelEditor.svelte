@@ -2,7 +2,7 @@
 	import { toast } from 'svelte-sonner';
 
 	import { onMount, onDestroy, getContext, tick } from 'svelte';
-	import { models, tools, functions, user } from '$lib/stores';
+	import { config, models, tools, functions, user } from '$lib/stores';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL, DEFAULT_CAPABILITIES } from '$lib/constants';
 
 	import { getTools } from '$lib/apis/tools';
@@ -35,6 +35,7 @@
 	import PromptSuggestions from './PromptSuggestions.svelte';
 	import TerminalSelector from './TerminalSelector.svelte';
 	import TTSVoiceInput from './TTSVoiceInput.svelte';
+	import Character from './Character.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
 	import AccessButton from '$lib/components/common/AccessButton.svelte';
 	import { extractInputVariables } from '$lib/utils';
@@ -104,7 +105,9 @@
 			description: '',
 			i18n: {},
 			suggestion_prompts: null,
-			tags: []
+			tags: [],
+			character: undefined as any,
+			lorebook_ids: undefined as string[] | undefined
 		},
 		params: {
 			system: ''
@@ -1044,6 +1047,18 @@
 							</div>
 						</div>
 
+						{#if preset && ($config?.features?.enable_character_cards || info.meta.character)}
+							<Character
+								bind:character={info.meta.character}
+								bind:lorebookIds={info.meta.lorebook_ids}
+								modelName={name}
+								sourcePrompt={system}
+								baseModelId={info.base_model_id}
+								convertible={!(model as any)?.meta?.character}
+								modelId={edit ? (model?.id ?? null) : null}
+							/>
+						{/if}
+
 						<section class="mt-2.5">
 							<div class="mb-2 text-xs text-gray-400 dark:text-gray-600">
 								{$i18n.t('Model Params')}
@@ -1054,8 +1069,16 @@
 									<div class="mb-1 text-xs text-gray-600 dark:text-gray-400">
 										{$i18n.t('System Prompt')}
 									</div>
+									{#if info.meta.character}
+										<div class="mb-1 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+											{$i18n.t(
+												'Compiled from the character fields when you save. Edit those fields instead.'
+											)}
+										</div>
+									{/if}
 									<div>
 										<Textarea
+											readonly={!!info.meta.character}
 											className="min-h-12 w-full resize-none overflow-y-hidden bg-transparent py-1 text-[0.8125rem] text-gray-700 outline-hidden placeholder:text-gray-300 dark:text-gray-300 dark:placeholder:text-gray-700"
 											placeholder={$i18n.t(
 												'Write your model system prompt content here\ne.g.) You are Mario from Super Mario Bros, acting as an assistant.'

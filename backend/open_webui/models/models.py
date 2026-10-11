@@ -10,6 +10,8 @@ from open_webui.models.access_grants import AccessGrantModel, AccessGrants
 from open_webui.models.groups import Groups
 from open_webui.models.users import User, UserModel, UserResponse, Users
 from open_webui.utils.misc import json_text_variants
+from open_webui.utils.roleplay.character import CharacterMeta
+from open_webui.utils.roleplay.prompt import compile_static_system_prompt
 from open_webui.utils.validate import validate_image_url
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from sqlalchemy import BigInteger, Boolean, Column, String, Text, cast, delete, func, or_, select, update
@@ -80,6 +82,10 @@ class ModelMeta(BaseModel):
     i18n: dict[str, Any] | None = None
     capabilities: dict | None = None
     knowledge: list[Any] | None = None
+    character: CharacterMeta | None = Field(
+        default=None, description='Character card fields; present when the model acts as a roleplay character.'
+    )
+    lorebook_ids: list[str] | None = None
 
     model_config = ConfigDict(extra='allow')
 
@@ -176,6 +182,14 @@ class ModelForm(BaseModel):
     params: ModelParams
     access_grants: list[dict] | None = None
     is_active: bool = True
+
+    @model_validator(mode='after')
+    def compile_character_system_prompt(self):
+        # Character fields are the source of truth; params.system mirrors them for code paths
+        # (API callers, arena, exports) that do not assemble the character prompt themselves.
+        if self.meta.character is not None:
+            self.params.system = compile_static_system_prompt(self.meta.character, self.name)
+        return self
 
 
 class ModelsTable:

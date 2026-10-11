@@ -2,26 +2,35 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import io
+import json
 import logging
 import posixpath
-from typing import Optional
+import re
+import uuid
+import zipfile
+from typing import Literal, Optional
 from urllib.parse import unquote
 
 from fastapi import (
     APIRouter,
     Depends,
+    File,
+    Form,
     HTTPException,
     Query,
     Request,
     Response,
+    UploadFile,
     status,
 )
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import (
     BYPASS_MODEL_ACCESS_CONTROL,
+    CHARACTER_CARD_MAX_BYTES,
     ENABLE_PROFILE_IMAGE_URL_FORWARDING,
     PROFILE_IMAGE_ALLOWED_MIME_TYPES,
 )
@@ -31,6 +40,7 @@ from open_webui.models.access_grants import AccessGrants, normalize_access_grant
 from open_webui.models.config import Config
 from open_webui.models.files import Files
 from open_webui.models.groups import Groups
+from open_webui.models.lorebooks import LorebookForm, Lorebooks
 from open_webui.models.models import (
     ModelAccessListResponse,
     ModelAccessResponse,
@@ -48,6 +58,38 @@ from open_webui.utils.access_control.files import has_access_to_file
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.chat_variables import get_chat_variables_schema
 from open_webui.utils.models import get_all_models
+from open_webui.utils.roleplay.cards import (
+    ZIP_SIGNATURE,
+    CardParseError,
+    ParsedCard,
+    character_to_v3,
+    parse_card_bytes,
+    sniff_image_type,
+    write_card_png,
+)
+from open_webui.utils.roleplay.character import CharacterMeta, character_summary
+from open_webui.utils.roleplay.convert import (
+    Conversion,
+    ai_conversion_prompt,
+    character_from_ai_reply,
+    parse_system_prompt,
+)
+from open_webui.utils.roleplay.expressions import (
+    MAX_EXPRESSIONS,
+    classify_prompt,
+    clean_expression_name,
+    expression_name_from_filename,
+    pick_expression,
+)
+from open_webui.utils.roleplay.filter import skip_character_system_prompt
+from open_webui.utils.roleplay.images import avatar_thumbnail_data_uri, ensure_png, expression_image
+from open_webui.utils.roleplay.prompt import build_macro_context
+from open_webui.utils.roleplay.prompt import greetings as character_greetings
+from open_webui.utils.roleplay.sources import SOURCES as CARD_SOURCES
+from open_webui.utils.roleplay.sources import SourceError, download_card, parse_card_link, search_cards
+from open_webui.utils.roleplay.story import MAX_STORY_CHARS as STORY_MAX_CHARS
+from open_webui.utils.roleplay.story import analyze_story, greeting_prompt, write_profile
+from open_webui.utils.roleplay.task_model import run_task_prompt
 from open_webui.utils.validate import BACKGROUND_IMAGE_MAX_BYTES, validate_background_image
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,6 +106,15 @@ def add_chat_variables_schema(model_dict: dict) -> dict:
         model_dict.setdefault('meta', {})['chat_variables_schema'] = schema
     elif isinstance(model_dict.get('meta'), dict):
         model_dict['meta'].pop('chat_variables_schema', None)
+    return model_dict
+
+
+def hide_curated_config(model_dict: dict) -> dict:
+    """Remove prompt configuration that read-only callers must not see (in place)."""
+    model_dict['params'] = {}
+    meta = model_dict.get('meta')
+    if isinstance(meta, dict) and isinstance(meta.get('character'), dict):
+        meta['character'] = character_summary(meta['character'])
     return model_dict
 
 
@@ -228,7 +279,7 @@ async def get_models(
         # Strip params (system prompt and other curated config) for read-only
         # callers, mirroring the per-id endpoint.
         if not write_access:
-            data['params'] = {}
+            hide_curated_config(data)
         items.append(ModelAccessResponse(**data, write_access=write_access))
 
     return ModelAccessListResponse(
@@ -343,6 +394,7 @@ async def create_new_model(
     )
 
     await _verify_background_image(form_data.meta.background_image_url, user, db)
+    _keep_character_files(form_data.meta, None)
 
     form_data.access_grants = await filter_allowed_access_grants(
         await Config.get('user.permissions'),
@@ -637,6 +689,7 @@ async def import_models(
                             db,
                             existing_model.meta.background_image_url if existing_model else None,
                         )
+                        _keep_character_files(imported_model.meta, existing_model.meta if existing_model else None)
                         saved = (
                             await Models.update_model_by_id(model_id, imported_model, db=db)
                             if existing_model
@@ -674,6 +727,779 @@ async def import_models(
 
 
 ############################
+# Character cards
+############################
+
+
+def _character_model_id(name: str) -> str:
+    slug = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')[:64].strip('-')
+    return f'{slug or "character"}-{uuid.uuid4().hex[:8]}'
+
+
+async def _require_character_cards_enabled() -> None:
+    if not await Config.get('characters.enable'):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Character cards are disabled.')
+
+
+async def _has_model_access(model: ModelModel, user, permission: str, db: AsyncSession) -> bool:
+    # Admins can already edit every model through /model/update.
+    if user.role == 'admin' or model.user_id == user.id:
+        return True
+    for level in ('write',) if permission == 'write' else ('read', 'write'):
+        if await AccessGrants.has_access(
+            user_id=user.id, resource_type='model', resource_id=model.id, permission=level, db=db
+        ):
+            return True
+    return False
+
+
+def _keep_character_files(meta, previous_meta) -> None:
+    """Character file references (full-size avatar, expression images) are set only server side, by
+    import and the expression endpoints; client-sent values could point at other users' files."""
+    character = getattr(meta, 'character', None) if meta is not None else None
+    if character is None:
+        return
+    previous = getattr(previous_meta, 'character', None) if previous_meta is not None else None
+    character.avatar_file_id = previous.avatar_file_id if previous is not None else None
+    character.expressions = dict(previous.expressions) if previous is not None else {}
+
+
+async def _get_character_model(id: str, user, db: AsyncSession, permission: str) -> ModelModel:
+    """Load a character model the user may read (or write). Missing and forbidden look the same."""
+    model = await Models.get_model_by_id(id, db=db)
+    if model is None or model.meta.character is None or not await _has_model_access(model, user, permission, db):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    return model
+
+
+async def _upload_character_image(request: Request, data: bytes, filename: str, user, db: AsyncSession):
+    from open_webui.routers.files import upload_file_handler
+
+    return await upload_file_handler(
+        request,
+        file=UploadFile(file=io.BytesIO(data), filename=filename),
+        metadata=None,
+        process=False,
+        user=user,
+        db=db,
+    )
+
+
+async def _discard_uploads(uploads: list, db: AsyncSession) -> None:
+    for uploaded in uploads:
+        try:
+            await Files.delete_file_by_id(uploaded.id, db=db)
+            await asyncio.to_thread(Storage.delete_file, uploaded.path)
+        except Exception:
+            log.exception('Could not clean up character image upload %s', uploaded.id)
+
+
+async def _character_meta_from_card(request: Request, parsed: ParsedCard, user, db, uploads: list) -> ModelMeta:
+    character = CharacterMeta.from_card(parsed.character)
+    meta = {
+        'description': character.creator_notes.strip()[:1000] or None,
+        'tags': character.tags,
+    }
+    if parsed.avatar:
+        meta['profile_image_url'] = await asyncio.to_thread(avatar_thumbnail_data_uri, parsed.avatar)
+        extension = parsed.avatar_content_type.split('/')[1]
+        uploaded = await _upload_character_image(request, parsed.avatar, f'avatar.{extension}', user, db)
+        uploads.append(uploaded)
+        character.avatar_file_id = uploaded.id
+    if parsed.background:
+        try:
+            content_type = await asyncio.to_thread(validate_background_image, parsed.background)
+        except ValueError as error:
+            log.info('Skipping character background for %s: %s', character.name, error)
+        else:
+            extension = content_type.split('/')[1]
+            uploaded = await _upload_character_image(request, parsed.background, f'background.{extension}', user, db)
+            uploads.append(uploaded)
+            meta['background_image_url'] = f'/api/v1/files/{uploaded.id}/content'
+    for name, image, _ in parsed.expressions:
+        if len(character.expressions) >= MAX_EXPRESSIONS:
+            break
+        stored = await _store_expression(request, name, image, user, db, uploads)
+        if stored:
+            character.expressions[stored[0]] = stored[1]
+    return ModelMeta(**meta, character=character)
+
+
+async def _store_expression(
+    request: Request, name: str, image: bytes, user, db, uploads: list
+) -> tuple[str, str] | None:
+    """Normalize and upload one expression image; ``(clean name, file id)``, or ``None`` if unusable."""
+    clean = clean_expression_name(name)
+    if not clean:
+        return None
+    try:
+        data, content_type = await asyncio.to_thread(expression_image, image)
+    except ValueError as error:
+        log.info('Skipping expression %r: %s', name, error)
+        return None
+    uploaded = await _upload_character_image(request, data, f'expression.{content_type.split("/")[1]}', user, db)
+    uploads.append(uploaded)
+    return clean, uploaded.id
+
+
+async def _lorebook_from_card(character: CharacterMeta, access_grants: list, user, db: AsyncSession):
+    """Move a card's embedded book into a standalone lorebook shared like the model; link it."""
+    book = character.character_book
+    character.character_book = None
+    if not book or not book.get('entries'):
+        return None
+    lorebook = await Lorebooks.insert_new_lorebook(
+        user.id,
+        LorebookForm(
+            name=(book.get('name') or f'{character.name} lorebook')[:256],
+            description=book.get('description') or None,
+            data=book,
+            meta={'source': 'character_card', 'character': character.name},
+            access_grants=access_grants,
+        ),
+        db=db,
+    )
+    return lorebook
+
+
+def _merged_character_book(books: list[dict]) -> dict | None:
+    """One ``character_book`` from several lorebooks: the first book's settings, every entry in order."""
+    books = [book for book in books if book and book.get('entries')]
+    if not books:
+        return None
+    entries = [entry for book in books for entry in book['entries']]
+    return {**books[0], 'entries': [{**entry, 'id': index} for index, entry in enumerate(entries)]}
+
+
+async def _base_model_exists(request: Request, base_model_id: str, user) -> bool:
+    if not request.app.state.MODELS:
+        await get_all_models(request, user=user)
+    return any(
+        model.get('id') == base_model_id and not model.get('preset') for model in request.app.state.MODELS.values()
+    )
+
+
+@router.post('/characters/import', response_model=list[ModelModel])
+async def import_character_cards(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    base_model_id: str = Form(...),
+    public: bool = Form(False),
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Create one character model per card (JSON, PNG or CHARX). Admin only, regardless of permissions."""
+    await _require_character_cards_enabled()
+    if not await _base_model_exists(request, base_model_id, user):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Unknown base model.')
+
+    parsed_cards = []
+    for file in files:
+        data = await file.read(CHARACTER_CARD_MAX_BYTES + 1)
+        try:
+            parsed_cards.append(await asyncio.to_thread(parse_card_bytes, data, file.filename or ''))
+        except CardParseError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=f'{file.filename or "Card"}: {error}'
+            ) from error
+    return await _create_character_models(request, parsed_cards, base_model_id, public, user, db)
+
+
+async def _create_character_models(request: Request, parsed_cards: list, base_model_id: str, public: bool, user, db):
+    access_grants = [{'principal_type': 'user', 'principal_id': '*', 'permission': 'read'}] if public else []
+    created = []
+    for parsed in parsed_cards:
+        uploads: list = []
+        lorebook = None
+        try:
+            meta = await _character_meta_from_card(request, parsed, user, db, uploads)
+            lorebook = await _lorebook_from_card(meta.character, access_grants, user, db)
+            if lorebook is not None:
+                meta.lorebook_ids = [lorebook.id]
+            model = await Models.insert_new_model(
+                ModelForm(
+                    id=_character_model_id(parsed.character.name),
+                    base_model_id=base_model_id,
+                    name=parsed.character.name.strip(),
+                    meta=meta,
+                    params=ModelParams(),
+                    access_grants=access_grants,
+                ),
+                user.id,
+                db=db,
+            )
+            if not model:
+                raise HTTPException(status_code=500, detail=f'Could not import {parsed.character.name}.')
+        except Exception as error:
+            await _discard_uploads(uploads, db)
+            if lorebook is not None:
+                await Lorebooks.delete_lorebook_by_id(lorebook.id, db=db)
+            if isinstance(error, ValueError):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+            raise
+        created.append(model)
+        await publish_event(request, EVENTS.MODEL_CREATED, actor=user, subject_id=model.id, data={'name': model.name})
+
+    return created
+
+
+class CardSourceImportForm(BaseModel):
+    source: str = ''
+    id: str = ''
+    url: str = ''
+    base_model_id: str
+    public: bool = False
+
+
+@router.get('/characters/sources')
+async def list_card_sources(user=Depends(get_admin_user)):
+    await _require_character_cards_enabled()
+    return [
+        {
+            'id': source.id,
+            'name': source.name,
+            'url': source.url,
+            'searchable': source.searchable,
+            'supports_tags': source.supports_tags,
+            # Whether the tags shown on results are the site's tags (Character Tavern shows warnings).
+            'result_tags': source.supports_tags and source.tags_in_results,
+        }
+        for source in CARD_SOURCES.values()
+    ]
+
+
+@router.get('/characters/sources/{source_id}/search')
+async def search_card_source(
+    source_id: str,
+    q: str = '',
+    page: int = 1,
+    sort: str = 'popular',
+    nsfw: bool = False,
+    tags: str = '',
+    exclude_tags: str = '',
+    user=Depends(get_admin_user),
+):
+    """Search a public card site. Admin only, like card import; the server fetches, so it works
+    regardless of the browser's CORS rules. ``tags``/``exclude_tags`` are comma-separated."""
+    await _require_character_cards_enabled()
+    try:
+        result = await search_cards(
+            source_id, q, page, sort, nsfw, tags=tags.split(','), exclude_tags=exclude_tags.split(',')
+        )
+    except SourceError as error:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+    return result.as_dict()
+
+
+@router.get('/characters/sources/{source_id}/card')
+async def preview_card_from_source(source_id: str, id: str, user=Depends(get_admin_user)):
+    """A card's contents, to read before importing. The download is kept briefly for the import."""
+    await _require_character_cards_enabled()
+    try:
+        data, filename = await download_card(source_id, id)
+    except SourceError as error:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+    try:
+        parsed = await asyncio.to_thread(parse_card_bytes, data, filename)
+    except CardParseError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    character = parsed.character
+    book = character.character_book or {}
+    return {
+        'name': character.name,
+        'creator': character.creator,
+        'creator_notes': character.creator_notes,
+        'description': character.description,
+        'personality': character.personality,
+        'scenario': character.scenario,
+        'first_mes': character.first_mes,
+        'alternate_greetings': character.alternate_greetings,
+        'mes_example': character.mes_example,
+        'system_prompt': character.system_prompt,
+        'tags': character.tags,
+        'lorebook_entries': len(book.get('entries') or []) if isinstance(book, dict) else 0,
+        'expressions': [name for name, _, _ in parsed.expressions],
+        'size': len(data),
+    }
+
+
+@router.post('/characters/sources/import', response_model=list[ModelModel])
+async def import_card_from_source(
+    request: Request,
+    form_data: CardSourceImportForm,
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Download one card from a card site (by source and id, or by its page link) and import it."""
+    await _require_character_cards_enabled()
+    await _require_base_model(request, form_data.base_model_id, user)
+    source_id, card_id = form_data.source, form_data.id
+    if form_data.url:
+        link = parse_card_link(form_data.url)
+        if link is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Paste the link to a character page on Chub, RisuRealm or Character Tavern, or a Poe bot.',
+            )
+        source_id, card_id = link
+    try:
+        data, filename = await download_card(source_id, card_id)
+    except SourceError as error:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+    try:
+        parsed = await asyncio.to_thread(parse_card_bytes, data, filename)
+    except CardParseError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    return await _create_character_models(request, [parsed], form_data.base_model_id, form_data.public, user, db)
+
+
+class CharacterConvertForm(BaseModel):
+    system: str = Field(max_length=100_000)
+    name: str = ''
+    base_model_id: str | None = None
+    use_ai: bool = False
+
+
+class CharacterConvertResponse(BaseModel):
+    character: dict
+    detected: list[str]
+    method: Literal['parser', 'ai']
+
+
+async def _convert_with_task_model(request: Request, form_data: CharacterConvertForm, user) -> Conversion:
+    """Ask the configured task model to split the prompt; same model selection as title generation."""
+    if not form_data.base_model_id or not await _base_model_exists(request, form_data.base_model_id, user):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Choose a base model first.')
+    reply = await run_task_prompt(
+        request, user, form_data.base_model_id, ai_conversion_prompt(form_data.system), 'character_conversion'
+    )
+    return character_from_ai_reply(reply, form_data.name)
+
+
+@router.post('/characters/convert', response_model=CharacterConvertResponse)
+async def convert_system_prompt_to_character(
+    request: Request,
+    form_data: CharacterConvertForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Split an existing system prompt into character fields for the editor to review; saves nothing."""
+    await _require_character_cards_enabled()
+    if user.role != 'admin' and not await has_permission(
+        user.id, 'workspace.models', await Config.get('user.permissions'), db=db
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.UNAUTHORIZED)
+    if not form_data.system.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='The system prompt is empty.')
+
+    if not form_data.use_ai:
+        conversion = parse_system_prompt(form_data.system, form_data.name)
+        return CharacterConvertResponse(character=conversion.character, detected=conversion.detected, method='parser')
+
+    try:
+        conversion = await _convert_with_task_model(request, form_data, user)
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+    return CharacterConvertResponse(character=conversion.character, detected=conversion.detected, method='ai')
+
+
+############################
+# Characters from a story
+############################
+
+
+class StoryAnalyzeForm(BaseModel):
+    text: str = Field(max_length=STORY_MAX_CHARS)
+    title: str = Field(default='', max_length=200)
+    base_model_id: str
+    analysis_model_id: str | None = None  # None: the task model
+    detailed: bool = True
+
+
+class StoryProfileForm(BaseModel):
+    text: str = Field(max_length=STORY_MAX_CHARS)
+    title: str = Field(default='', max_length=200)
+    base_model_id: str
+    analysis_model_id: str | None = None
+    character: dict
+
+
+class StoryGreetingForm(BaseModel):
+    base_model_id: str
+    character: dict
+    scenario: str = ''
+
+
+class StoryCharacterForm(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = ''
+    personality: str = ''
+    first_mes: str = ''
+    mes_example: str = ''
+    creator_notes: str = ''
+
+
+class StoryCreateForm(BaseModel):
+    title: str = Field(default='', max_length=200)
+    base_model_id: str
+    public: bool = False
+    scenario: str = ''
+    characters: list[StoryCharacterForm] = Field(min_length=1, max_length=20)
+    lorebook: dict | None = None
+
+
+async def _require_base_model(request: Request, base_model_id: str, user) -> None:
+    if not await _base_model_exists(request, base_model_id, user):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Unknown base model.')
+
+
+@router.post('/characters/story/analyze')
+async def analyze_story_for_characters(request: Request, form_data: StoryAnalyzeForm, user=Depends(get_admin_user)):
+    """Draft characters, a world lorebook and a timeline from a story. Admin only; saves nothing."""
+    await _require_character_cards_enabled()
+    await _require_base_model(request, form_data.base_model_id, user)
+    complete = await _story_completer(request, user, form_data.base_model_id, form_data.analysis_model_id)
+    try:
+        draft = await analyze_story(form_data.text, complete, form_data.title.strip(), detailed=form_data.detailed)
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    return dataclasses.asdict(draft)
+
+
+async def _story_completer(request: Request, user, base_model_id: str, analysis_model_id: str | None):
+    """Prompts go to the chosen analysis model, or to the task model for the characters' base model."""
+    if analysis_model_id:
+        await _require_base_model(request, analysis_model_id, user)
+
+    async def complete(prompt: str) -> str:
+        if analysis_model_id:
+            return await run_task_prompt(request, user, analysis_model_id, prompt, 'story_analysis', direct=True)
+        return await run_task_prompt(request, user, base_model_id, prompt, 'story_analysis')
+
+    return complete
+
+
+@router.post('/characters/story/profile')
+async def write_story_profile(request: Request, form_data: StoryProfileForm, user=Depends(get_admin_user)):
+    """A detailed sheet for one drafted character, from the passages they appear in. Saves nothing."""
+    await _require_character_cards_enabled()
+    await _require_base_model(request, form_data.base_model_id, user)
+    complete = await _story_completer(request, user, form_data.base_model_id, form_data.analysis_model_id)
+    try:
+        return await write_profile(form_data.character, form_data.text, complete, form_data.title.strip())
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+
+
+@router.post('/characters/story/greeting')
+async def draft_story_greeting(request: Request, form_data: StoryGreetingForm, user=Depends(get_admin_user)):
+    await _require_character_cards_enabled()
+    await _require_base_model(request, form_data.base_model_id, user)
+    try:
+        reply = await run_task_prompt(
+            request,
+            user,
+            form_data.base_model_id,
+            greeting_prompt(form_data.character, form_data.scenario),
+            'story_greeting',
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+    first_mes = reply.strip()
+    if len(first_mes) > 1 and first_mes[0] == first_mes[-1] == '"':
+        # The whole reply is wrapped in quotes; quotes inside it are dialogue and stay.
+        first_mes = first_mes[1:-1].strip()
+    return {'first_mes': first_mes}
+
+
+@router.post('/characters/story/create', response_model=list[ModelModel])
+async def create_characters_from_story(
+    request: Request,
+    form_data: StoryCreateForm,
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Create the reviewed characters (and their shared world lorebook). Admin only, like card import."""
+    await _require_character_cards_enabled()
+    await _require_base_model(request, form_data.base_model_id, user)
+    access_grants = [{'principal_type': 'user', 'principal_id': '*', 'permission': 'read'}] if form_data.public else []
+    title = form_data.title.strip()
+
+    lorebook = None
+    if form_data.lorebook and form_data.lorebook.get('entries'):
+        lorebook = await Lorebooks.insert_new_lorebook(
+            user.id,
+            LorebookForm(
+                name=(form_data.lorebook.get('name') or f'{title or "Story"} world')[:256],
+                data=form_data.lorebook,
+                meta={'source': 'story', 'title': title},
+                access_grants=access_grants,
+            ),
+            db=db,
+        )
+
+    created = []
+    try:
+        for draft in form_data.characters:
+            character = CharacterMeta(
+                spec_version='owui',
+                **draft.model_dump(),
+                scenario=form_data.scenario,
+                source=[title] if title else [],
+            )
+            model = await Models.insert_new_model(
+                ModelForm(
+                    id=_character_model_id(draft.name),
+                    base_model_id=form_data.base_model_id,
+                    name=draft.name.strip(),
+                    meta=ModelMeta(
+                        description=draft.creator_notes.strip() or None,
+                        character=character,
+                        lorebook_ids=[lorebook.id] if lorebook else None,
+                    ),
+                    params=ModelParams(),
+                    access_grants=access_grants,
+                ),
+                user.id,
+                db=db,
+            )
+            if not model:
+                raise HTTPException(status_code=500, detail=f'Could not create {draft.name}.')
+            created.append(model)
+    except Exception:
+        for model in created:
+            await Models.delete_model_by_id(model.id, db=db)
+        if lorebook is not None:
+            await Lorebooks.delete_lorebook_by_id(lorebook.id, db=db)
+        raise
+
+    for model in created:
+        await publish_event(request, EVENTS.MODEL_CREATED, actor=user, subject_id=model.id, data={'name': model.name})
+    return created
+
+
+async def _read_avatar(model: ModelModel, db: AsyncSession) -> bytes | None:
+    file_id = model.meta.character.avatar_file_id
+    file = await Files.get_file_by_id(file_id, db=db) if file_id else None
+    if file and file.path:
+        try:
+            path = await asyncio.to_thread(Storage.get_file, file.path)
+            with open(path, 'rb') as image:
+                return await asyncio.to_thread(image.read, CHARACTER_CARD_MAX_BYTES)
+        except OSError:
+            log.warning('Character avatar file %s is unreadable; falling back to the thumbnail', file_id)
+    url = model.meta.profile_image_url or ''
+    if url.startswith('data:image') and ';base64,' in url:
+        return base64.b64decode(url.split(',', 1)[1])
+    return None
+
+
+@router.get('/model/character/export')
+async def export_character_card(
+    id: str,
+    format: Literal['png', 'json'] = 'png',
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Export a character model as a V3 card (PNG also carries a V2 projection)."""
+    await _require_character_cards_enabled()
+    model = await _get_character_model(id, user, db, 'write')
+    character = model.meta.character
+    stem = re.sub(r'[^A-Za-z0-9_-]+', '_', character.name or model.name).strip('_') or 'character'
+    headers = {'Content-Disposition': f'attachment; filename="{stem}.{format}"'}
+    if character.raw_truncated:
+        # The original card was too large to keep; unknown fields from it are not in the export.
+        headers['X-Character-Raw-Truncated'] = 'true'
+
+    card_data = character.to_card(model.name)
+    lorebook_ids = model.meta.lorebook_ids or []
+    lorebooks = await (
+        Lorebooks.get_lorebooks_by_ids(lorebook_ids, db=db)
+        if user.role == 'admin'
+        else Lorebooks.get_readable_lorebooks_by_ids(lorebook_ids, user.id, db=db)
+    )
+    card_data.character_book = _merged_character_book(
+        [card_data.character_book, *[lorebook.as_book() for lorebook in lorebooks]]
+    )
+    if format == 'json':
+        content = json.dumps(character_to_v3(card_data, assets=[]), ensure_ascii=False).encode('utf-8')
+        return Response(content=content, media_type='application/json', headers=headers)
+
+    png = await asyncio.to_thread(ensure_png, await _read_avatar(model, db))
+    content = await asyncio.to_thread(write_card_png, png, character_to_v3(card_data))
+    return Response(content=content, media_type='image/png', headers=headers)
+
+
+@router.get('/model/character/greetings', response_model=list[str])
+async def get_character_greetings(
+    id: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """The first message and alternate greetings, with macros expanded for the requesting user."""
+    await _require_character_cards_enabled()
+    model = await _get_character_model(id, user, db, 'read')
+    character = model.meta.character
+    ctx = build_macro_context(character, model_name=model.name, user_name=user.name)
+    return character_greetings(character, ctx)
+
+
+@router.get('/model/character/expression')
+async def get_character_expression(
+    id: str,
+    name: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """One expression image of a character the user may chat with."""
+    await _require_character_cards_enabled()
+    model = await _get_character_model(id, user, db, 'read')
+    file_id = model.meta.character.expressions.get(clean_expression_name(name))
+    file = await Files.get_file_by_id(file_id, db=db) if file_id else None
+    if not file or not file.path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    try:
+        path = await asyncio.to_thread(Storage.get_file, file.path)
+    except Exception as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND) from error
+    content_type = (file.meta or {}).get('content_type') or 'image/webp'
+    if content_type not in PROFILE_IMAGE_ALLOWED_MIME_TYPES:
+        content_type = 'application/octet-stream'
+    return FileResponse(
+        path,
+        media_type=content_type,
+        headers={'Cache-Control': 'private, max-age=86400', 'X-Content-Type-Options': 'nosniff'},
+    )
+
+
+class CharacterExpressionsResponse(BaseModel):
+    expressions: list[str]
+    skipped: list[str] = []
+
+
+async def _save_character_meta(model: ModelModel, db: AsyncSession) -> None:
+    form = ModelForm(**{**model.model_dump(), 'meta': model.meta})
+    if not await Models.update_model_by_id(model.id, form, db=db):
+        raise HTTPException(status_code=500, detail='Could not update the character.')
+
+
+def _expression_files(name: str, data: bytes) -> list[tuple[str, bytes]]:
+    """``(filename, bytes)`` for an uploaded image, or every image in an uploaded sprite-pack zip."""
+    if data.startswith(ZIP_SIGNATURE):
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile as error:
+            raise HTTPException(status_code=400, detail=f'{name}: not a valid zip file.') from error
+        entries = [info for info in archive.infolist() if not info.is_dir() and info.file_size <= 20 * 1024 * 1024]
+        if sum(info.file_size for info in entries) > CHARACTER_CARD_MAX_BYTES:
+            raise HTTPException(status_code=400, detail=f'{name}: the archive is too large.')
+        return [(info.filename, archive.read(info)) for info in entries if not info.filename.startswith('__MACOSX')]
+    return [(name, data)]
+
+
+@router.post('/model/character/expressions', response_model=CharacterExpressionsResponse)
+async def upload_character_expressions(
+    request: Request,
+    id: str,
+    files: list[UploadFile] = File(...),
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Add or replace expression images: each image is named by its file name (``joy.png`` is
+    "joy"); a zip adds every image in it, as SillyTavern sprite packs are shared."""
+    await _require_character_cards_enabled()
+    model = await _get_character_model(id, user, db, 'write')
+    character = model.meta.character
+    uploads: list = []
+    skipped: list[str] = []
+    replaced: list[str] = []
+    try:
+        for upload in files:
+            data = await upload.read(CHARACTER_CARD_MAX_BYTES + 1)
+            if len(data) > CHARACTER_CARD_MAX_BYTES:
+                raise HTTPException(status_code=400, detail=f'{upload.filename}: the file is too large.')
+            for filename, image in _expression_files(upload.filename or 'image', data):
+                name = expression_name_from_filename(filename)
+                if not sniff_image_type(image) or not name:
+                    skipped.append(filename)
+                    continue
+                if name not in character.expressions and len(character.expressions) >= MAX_EXPRESSIONS:
+                    skipped.append(filename)
+                    continue
+                stored = await _store_expression(request, name, image, user, db, uploads)
+                if stored is None:
+                    skipped.append(filename)
+                    continue
+                if stored[0] in character.expressions:
+                    replaced.append(character.expressions[stored[0]])
+                character.expressions[stored[0]] = stored[1]
+        await _save_character_meta(model, db)
+    except Exception:
+        await _discard_uploads(uploads, db)
+        raise
+    await _discard_file_ids(replaced, db)
+    return CharacterExpressionsResponse(expressions=sorted(character.expressions), skipped=skipped)
+
+
+@router.delete('/model/character/expression', response_model=CharacterExpressionsResponse)
+async def delete_character_expression(
+    id: str,
+    name: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    await _require_character_cards_enabled()
+    model = await _get_character_model(id, user, db, 'write')
+    character = model.meta.character
+    file_id = character.expressions.pop(clean_expression_name(name), None)
+    if file_id:
+        await _save_character_meta(model, db)
+        await _discard_file_ids([file_id], db)
+    return CharacterExpressionsResponse(expressions=sorted(character.expressions))
+
+
+class ExpressionClassifyForm(BaseModel):
+    model_id: str
+    text: str = Field(max_length=200_000)
+
+
+@router.post('/model/character/expression/classify')
+async def classify_character_expression(
+    request: Request,
+    form_data: ExpressionClassifyForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """The character's expression that best fits a reply, picked by the task model."""
+    await _require_character_cards_enabled()
+    model = await _get_character_model(form_data.model_id, user, db, 'read')
+    character = model.meta.character
+    names = sorted(character.expressions)
+    if not names or not form_data.text.strip():
+        return {'name': None}
+    if len(names) == 1:
+        return {'name': names[0]}
+    if not request.app.state.MODELS:
+        await get_all_models(request, user=user)
+    prompt = classify_prompt(character.display_name(model.name), names, form_data.text)
+    # Without a separate task model the task goes to the character model itself.
+    skip_character_system_prompt(request, model.id)
+    try:
+        reply = await run_task_prompt(request, user, model.id, prompt, 'character_expression')
+    except Exception as error:
+        log.info('Expression classification failed for %s: %s', model.id, error)
+        return {'name': None}
+    return {'name': pick_expression(reply, names)}
+
+
+async def _discard_file_ids(file_ids: list[str], db: AsyncSession) -> None:
+    for file_id in file_ids:
+        file = await Files.get_file_by_id(file_id, db=db)
+        if file:
+            await _discard_uploads([file], db)
+
+
+############################
 # SyncModels
 ############################
 
@@ -697,6 +1523,7 @@ async def sync_models(
         await _verify_background_image(
             model.meta.background_image_url, user, db, previous.meta.background_image_url if previous else None
         )
+        _keep_character_files(model.meta, previous.meta if previous else None)
     models = await Models.sync_models(user.id, form_data.models, db=db)
     await publish_event(
         request,
@@ -750,7 +1577,7 @@ async def get_model_by_id(id: str, user=Depends(get_verified_user), db: AsyncSes
             # still receive the full object so the workspace edit UI keeps
             # working for users who legitimately curate the model.
             if not write_access:
-                model_dict['params'] = {}
+                hide_curated_config(model_dict)
             return ModelAccessResponse(
                 **model_dict,
                 write_access=write_access,
@@ -984,6 +1811,7 @@ async def update_model_by_id(
     if 'background_image_url' not in form_data.meta.model_fields_set:
         form_data.meta.background_image_url = model.meta.background_image_url
     await _verify_background_image(form_data.meta.background_image_url, user, db, model.meta.background_image_url)
+    _keep_character_files(form_data.meta, model.meta)
 
     if form_data.access_grants is not None:
         # The editor resends every stored grant, so re-checking them would strip sharing this user cannot re-create.

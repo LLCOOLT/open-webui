@@ -129,6 +129,11 @@ from open_webui.utils.misc import (
 from open_webui.utils.payload import apply_params_to_form_data, apply_system_prompt_to_body, resolve_system_prompt
 from open_webui.utils.plugin import load_function_module_by_id
 from open_webui.utils.response import merge_usage, normalize_usage
+from open_webui.utils.roleplay.filter import (
+    apply_character_messages,
+    apply_character_system,
+    roleplay_memory_settings,
+)
 from open_webui.utils.sanitize import sanitize_code
 from open_webui.utils.skills import (
     apply_skills_create_prompt,
@@ -2481,6 +2486,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if regeneration_prompt:
         form_data['messages'].append({'role': 'user', 'content': regeneration_prompt})
 
+    # Character models: the character block replaces the user's system prompt (which becomes
+    # {{original}}) before compaction, so every later stage builds on it.
+    form_data = await apply_character_system(request, form_data, metadata, user, model)
+
     if is_saved_chat_id(chat_id) and user_message_id:
         if getattr(request.state, 'direct', False) and hasattr(request.state, 'model'):
             compaction_models = {
@@ -2493,6 +2502,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         system_message = get_system_message(form_data.get('messages', []))
         system_prompt = get_content_from_message(system_message) if system_message else ''
 
+        memory_settings = dict(roleplay_memory_settings(request) or {})
+        summary_label = memory_settings.pop('label', None) or '[CONVERSATION SUMMARY]'
         try:
             form_data['messages'], context_summary, _ = await compact_messages_for_request(
                 request,
@@ -2502,10 +2513,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 form_data.get('model'),
                 compaction_models,
                 system_prompt,
+                overrides=memory_settings or None,
             )
             if context_summary:
                 form_data['messages'] = add_or_update_system_message(
-                    f'[CONVERSATION SUMMARY]\n{context_summary}',
+                    f'{summary_label}\n{context_summary}',
                     form_data['messages'],
                     append=True,
                 )
@@ -2668,6 +2680,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             )
         except Exception as e:
             raise Exception(f'{e}')
+
+    # Example dialogue, depth prompts and post-history instructions, after any inlet rewrites.
+    form_data = apply_character_messages(request, form_data, model)
 
     features = form_data.pop('features', None) or {}
     extra_params['__features__'] = features

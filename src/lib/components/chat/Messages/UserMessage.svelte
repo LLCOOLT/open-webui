@@ -142,9 +142,10 @@
 			Do not alter, remove, obscure, or replace it except as LICENSE permits:
 			https://docs.openwebui.com/license. -->
 			<ProfileImage
-				src={user?.id
-					? `${WEBUI_API_BASE_URL}/users/${user.id}/profile/image`
-					: `${WEBUI_BASE_URL}/static/favicon.png`}
+				src={message?.persona?.avatar_url ??
+					(user?.id
+						? `${WEBUI_API_BASE_URL}/users/${user.id}/profile/image`
+						: `${WEBUI_BASE_URL}/static/favicon.png`)}
 				className={'size-7 user-message-profile-image'}
 			/>
 		</div>
@@ -159,7 +160,9 @@
 		{#if !($settings?.chatBubble ?? true) && !(message?.meta?.internal === true && message?.meta?.type === 'subagent') && !(message?.meta?.internal === true && message?.meta?.type === 'timer')}
 			<div>
 				<Name>
-					{#if message.user}
+					{#if message?.persona?.name}
+						{message.persona.name}
+					{:else if message.user}
 						{$i18n.t('You')}
 						<span class=" text-gray-500 text-[0.9375rem] font-normal">{message?.user ?? ''}</span>
 					{:else if $settings.showUsername || $_user?.name !== user?.name}
@@ -168,6 +171,18 @@
 						{$i18n.t('You')}
 					{/if}
 				</Name>
+			</div>
+		{/if}
+
+		{#if (($settings?.chatBubble ?? true) && message?.persona?.name) || message?.ooc}
+			<div class="flex justify-end items-center gap-1.5 text-xs text-gray-400 mb-0.5">
+				{#if ($settings?.chatBubble ?? true) && message?.persona?.name}{message.persona.name}{/if}
+				{#if message?.ooc}
+					<span
+						class="rounded-full px-1.5 py-px text-[0.625rem] font-medium text-amber-600 dark:text-amber-300 bg-amber-50 dark:bg-amber-400/10"
+						title={$i18n.t('Out of character')}>OOC</span
+					>
+				{/if}
 			</div>
 		{/if}
 

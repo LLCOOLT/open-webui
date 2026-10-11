@@ -46,7 +46,8 @@
 		showFileNavPath,
 		showFileNavDir,
 		chatRequestQueues,
-		desktopEvent
+		desktopEvent,
+		chatPersonaId
 	} from '$lib/stores';
 	import { refreshChatList, refreshFolderChatLists } from '$lib/stores/chatList';
 
@@ -107,6 +108,11 @@
 	import { getFunctions } from '$lib/apis/functions';
 	import { initiateOAuthRedirect } from '$lib/apis/configs';
 	import { updateFolderById } from '$lib/apis/folders';
+	import {
+		characterExpressionUrl,
+		classifyCharacterExpression,
+		getCharacterGreetings
+	} from '$lib/apis/models';
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
@@ -334,6 +340,7 @@
 	let imageGenerationEnabled = false;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
+	let oocEnabled = false;
 	let webSearchActive = false;
 	let showWebSearchConfirm = false;
 	let pendingWebSearchPrompt: string | null = null;
@@ -741,6 +748,81 @@
 	const onSelectedModelIdsChange = () => {
 		resetInput();
 		oldSelectedModelIds = structuredClone(selectedModelIds);
+	};
+
+	// The persona the user speaks as in this chat (shown on their messages); see chatPersonaId.
+	const activePersona = () => {
+		if (!$config?.features?.enable_character_cards || $chatPersonaId === '') return null;
+		const personas = $settings?.personas ?? [];
+		const persona =
+			personas.find((item) => item.id === $chatPersonaId) ??
+			personas.find((item) => item.is_default);
+		return persona
+			? { id: persona.id, name: persona.name, avatar_url: persona.avatar_url ?? null }
+			: null;
+	};
+
+	// Character greetings: a new chat with one character model opens with its greetings as
+	// root assistant messages, so the sibling arrows swipe between them. They are saved with the
+	// chat on the first send, and replaced while nothing else has been said.
+	let greetingModelId: string | null = null;
+	$: seedCharacterGreetings(selectedModels, $chatId, history?.currentId === null);
+
+	// True for the first user message of a chat that opened with character greetings.
+	const startsAfterGreeting = (_history, userMessage) =>
+		!!userMessage?.parentId &&
+		createMessagesList(_history, userMessage.parentId).every((message: any) => message?.greeting);
+
+	const hasOnlyGreetings = () =>
+		Object.values(history?.messages ?? {}).every((message: any) => message?.greeting);
+
+	const seedCharacterGreetings = async (..._triggers: unknown[]) => {
+		if ($chatId || readOnly || !hasOnlyGreetings()) return;
+
+		const model: any =
+			selectedModels.length === 1 ? $models.find((m) => m.id === selectedModels[0]) : null;
+		const modelId: string | null =
+			$config?.features?.enable_character_cards && model?.info?.meta?.character?.greeting_count
+				? model.id
+				: null;
+		const seeded = history.currentId !== null;
+		if (modelId === greetingModelId && (seeded || !modelId)) return;
+		greetingModelId = modelId;
+
+		let greetings: string[] = [];
+		if (modelId) {
+			try {
+				greetings = await getCharacterGreetings(localStorage.token, modelId);
+			} catch (error) {
+				console.error(error);
+			}
+		}
+		// The selection or the chat may have changed while the greetings loaded.
+		if (greetingModelId !== modelId || $chatId || !hasOnlyGreetings()) return;
+
+		const timestamp = Math.floor(Date.now() / 1000);
+		const messages = Object.fromEntries(
+			greetings.map((content) => {
+				const id = uuidv4();
+				return [
+					id,
+					{
+						id,
+						parentId: null,
+						childrenIds: [],
+						role: 'assistant',
+						content,
+						done: true,
+						greeting: true,
+						model: model.id,
+						modelName: model.name ?? model.id,
+						modelIdx: 0,
+						timestamp
+					}
+				];
+			})
+		);
+		history = { messages, currentId: Object.keys(messages)[0] ?? null } as any;
 	};
 
 	const mergeFiles = (current, incoming) => {
@@ -1176,6 +1258,10 @@
 		}
 
 		if (status?.done) {
+			if (!status?.error) {
+				// Chat Controls > Roleplay shows the story memory this just updated.
+				window.dispatchEvent(new CustomEvent('roleplay:memory-updated'));
+			}
 			if (contextCompactionToastId !== null) {
 				if (status?.error) {
 					toast.error($i18n.t('Context compaction failed'), {
@@ -2156,6 +2242,7 @@
 		};
 
 		chatFiles = [];
+		chatPersonaId.set(null);
 		params = {};
 		chatVariables = {};
 		taskIds = null;
@@ -2288,6 +2375,7 @@
 		});
 
 		if (chat) {
+			chatPersonaId.set(chat.meta?.persona_id ?? null);
 			tags = await getTagsById(localStorage.token, $chatId).catch(async (error) => {
 				console.warn('[note-chat] getTagsById failed; continuing without tags', {
 					chatIdProp,
@@ -2856,9 +2944,23 @@
 				copyToClipboard(visibleContent);
 			}
 
-			if ($settings.responseAutoPlayback && !$showCallOverlay) {
+			const characterModel = $models.find((m) => m.id === message.model) as any;
+			const characterVoice =
+				($settings?.autoPlayCharacterVoice ?? false) &&
+				!!characterModel?.info?.meta?.character &&
+				!!characterModel?.info?.meta?.tts?.voice;
+			if (($settings.responseAutoPlayback || characterVoice) && !$showCallOverlay) {
 				await tick();
 				document.getElementById(`speak-button-${message.id}`)?.click();
+			}
+
+			if (
+				($settings?.characterExpressions ?? true) &&
+				(characterModel?.info?.meta?.character?.expressions ?? []).length &&
+				visibleContent.trim()
+			) {
+				// Background: the reply is already shown; its picture follows when the task model answers.
+				pickExpression(chatId, message.id, characterModel.id, visibleContent);
 			}
 
 			// Emit chat event for TTS (only when call overlay is active)
@@ -2915,6 +3017,12 @@
 			(item, index, array) => array.findIndex((i) => equal(i, item)) === index
 		);
 
+		// A chat that opens with character greetings already has a root message, so the server
+		// would treat this send as a follow-up to a chat that does not exist yet. Save it first.
+		if (!$chatId && !$temporaryChatEnabled && history.messages[history.currentId]?.greeting) {
+			await initChatHandler(history);
+		}
+
 		// Create user message
 		let userMessageId = uuidv4();
 		let userMessage = {
@@ -2925,7 +3033,9 @@
 			content: inputContent,
 			files: _files.length > 0 ? _files : undefined,
 			timestamp: Math.floor(Date.now() / 1000), // Unix epoch
-			models: selectedModels
+			models: selectedModels,
+			...(activePersona() ? { persona: activePersona() } : {}),
+			...(oocEnabled ? { ooc: true } : {})
 		};
 
 		// Add message to history and Set currentId to messageId
@@ -2946,6 +3056,8 @@
 		saveSessionSelectedModels();
 
 		await sendMessage(history, userMessageId);
+		// Out of character applies to one message.
+		oocEnabled = false;
 	};
 
 	const handleManualCompact = async () => {
@@ -3408,6 +3520,10 @@
 			features = { ...features, memory: true };
 		}
 
+		if (oocEnabled) {
+			features = { ...features, ooc: true };
+		}
+
 		return features;
 	};
 
@@ -3612,6 +3728,9 @@
 				session_id: $socket?.id,
 				chat_id: _chatId || undefined,
 				folder_id: $selectedFolder?.id ?? undefined,
+				...($config?.features?.enable_character_cards && $chatPersonaId !== null
+					? { persona_id: $chatPersonaId }
+					: {}),
 
 				id: responseMessageId,
 				...(messageIdsList ? { message_ids: messageIdsList } : {}),
@@ -3623,6 +3742,7 @@
 				background_tasks: {
 					...(!$temporaryChatEnabled &&
 					(!_chatId ||
+						startsAfterGreeting(_history, userMessage) ||
 						(embedded &&
 							(userMessage?.parentId ?? null) === null &&
 							createMessagesList(_history, responseMessageId).length === 2))
@@ -3993,6 +4113,48 @@
 
 		return _chatId;
 	};
+
+	const pickExpression = async (_chatId, messageId, modelId, text) => {
+		try {
+			const { name } = await classifyCharacterExpression(localStorage.token, modelId, text);
+			const message = history.messages[messageId];
+			if (!name || !message || $chatId !== _chatId) return;
+			message.expression = name;
+			history.messages[messageId] = message;
+			history = history;
+			if (!$temporaryChatEnabled) await saveChatHandler(_chatId, history);
+		} catch (error) {
+			console.debug('Expression classification failed', error);
+		}
+	};
+
+	// The latest expression on the current branch, for the portrait beside the chat. While a new
+	// reply is still being classified, the previous expression stays up.
+	const currentExpression = (history) => {
+		let id = history?.currentId;
+		for (let steps = 0; id && steps < 40; steps += 1) {
+			const message = history.messages[id];
+			if (message?.role === 'assistant' && message?.expression) {
+				const model = $models.find((m) => m.id === message.model) as any;
+				if ((model?.info?.meta?.character?.expressions ?? []).includes(message.expression)) {
+					return { modelId: model.id, name: message.expression, alt: model.name };
+				}
+			}
+			id = message?.parentId;
+		}
+		return null;
+	};
+
+	let chatPaneWidth = 0;
+	$: portraitWidth = $settings?.widescreenMode
+		? 0
+		: Math.min(340, Math.floor((chatPaneWidth - 58 * 16) / 2) - 16);
+	$: portrait =
+		($settings?.characterExpressions ?? true) &&
+		($settings?.characterPortrait ?? true) &&
+		portraitWidth >= 140
+			? currentExpression(history)
+			: null;
 
 	const saveChatHandler = async (_chatId, history) => {
 		if ($chatId == _chatId) {
@@ -4378,7 +4540,23 @@
 							}}
 						/>
 					{/if}
-					<div id="chat-pane" class="flex flex-col flex-auto z-10 w-full @container overflow-auto">
+					<div
+						id="chat-pane"
+						class="relative flex flex-col flex-auto z-10 w-full @container overflow-auto"
+						bind:clientWidth={chatPaneWidth}
+					>
+						{#if portrait}
+							{#key `${portrait.modelId}:${portrait.name}`}
+								<img
+									src={characterExpressionUrl(portrait.modelId, portrait.name)}
+									alt={`${portrait.alt}: ${portrait.name}`}
+									title={portrait.name}
+									class="character-portrait absolute right-2 bottom-28 z-0 pointer-events-none select-none object-contain object-bottom max-h-[60vh] drop-shadow-lg"
+									style="width: {portraitWidth}px"
+									in:fade={{ duration: 250 }}
+								/>
+							{/key}
+						{/if}
 						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
 							<div
 								class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full z-10 scrollbar-hidden"
@@ -4449,6 +4627,7 @@
 										bind:selectedFilterIds
 										bind:imageGenerationEnabled
 										bind:codeInterpreterEnabled
+										bind:oocEnabled
 										{pendingOAuthTools}
 										{oauthRedirectHandler}
 										bind:webSearchEnabled
@@ -4541,6 +4720,7 @@
 										bind:selectedFilterIds
 										bind:imageGenerationEnabled
 										bind:codeInterpreterEnabled
+										bind:oocEnabled
 										{pendingOAuthTools}
 										{oauthRedirectHandler}
 										bind:webSearchEnabled
@@ -4602,6 +4782,7 @@
 									bind:selectedFilterIds
 									bind:imageGenerationEnabled
 									bind:codeInterpreterEnabled
+									bind:oocEnabled
 									bind:webSearchEnabled
 									bind:atSelectedModel
 									bind:showCommands

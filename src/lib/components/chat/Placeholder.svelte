@@ -59,6 +59,7 @@
 
 	export let imageGenerationEnabled = false;
 	export let codeInterpreterEnabled = false;
+	export let oocEnabled = false;
 	export let webSearchEnabled = false;
 	export let toolApprovalMode = 'full';
 	export let onToolApprovalModeChange: Function = () => {};
@@ -95,6 +96,10 @@
 	$: selectedModel = atSelectedModel ?? models[selectedModelIdx];
 	$: selectedModelName = resolveLocalizedModelName(selectedModel, $i18n.language);
 	$: selectedModelDescription = resolveLocalizedModelDescription(selectedModel, $i18n.language);
+	$: characterNotes = (() => {
+		const notes = (selectedModel?.info?.meta?.character?.creator_notes ?? '').trim();
+		return notes && notes !== (selectedModelDescription ?? '').trim() ? notes : '';
+	})();
 	$: selectedSuggestionPrompts =
 		resolveLocalizedModelPromptSuggestions(atSelectedModel, $i18n.language) ??
 		resolveLocalizedModelPromptSuggestions(models[selectedModelIdx], $i18n.language) ??
@@ -216,6 +221,14 @@
 									)}
 								</div>
 							</Tooltip>
+							{#if characterNotes}
+								<!-- Creator notes are for display only; they are never sent to the model. -->
+								<div
+									class="mt-1 text-sm font-normal text-gray-400 dark:text-gray-500 line-clamp-3 whitespace-pre-line"
+								>
+									{characterNotes}
+								</div>
+							{/if}
 
 							{#if models[selectedModelIdx]?.info?.meta?.user}
 								<div class="mt-0.5 text-sm font-normal text-gray-400 dark:text-gray-500">
@@ -252,6 +265,7 @@
 						bind:selectedFilterIds
 						bind:imageGenerationEnabled
 						bind:codeInterpreterEnabled
+						bind:oocEnabled
 						bind:webSearchEnabled
 						bind:atSelectedModel
 						bind:showCommands

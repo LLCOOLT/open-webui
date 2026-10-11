@@ -72,6 +72,10 @@
 
 	let temporaryChatByDefault = false;
 	let chatFadeStreamingText = true;
+	let roleplayFormatting = true;
+	let autoPlayCharacterVoice = false;
+	let characterExpressions = true;
+	let characterPortrait = true;
 	let collapseCodeBlocks = false;
 	let renderMarkdownInUserMessages = true;
 	let renderMarkdownInAssistantMessages = true;
@@ -332,6 +336,10 @@
 
 		displayMultiModelResponsesInTabs = currentSettings?.displayMultiModelResponsesInTabs ?? false;
 		chatFadeStreamingText = currentSettings?.chatFadeStreamingText ?? true;
+		roleplayFormatting = currentSettings?.roleplayFormatting ?? true;
+		autoPlayCharacterVoice = currentSettings?.autoPlayCharacterVoice ?? false;
+		characterExpressions = currentSettings?.characterExpressions ?? true;
+		characterPortrait = currentSettings?.characterPortrait ?? true;
 
 		richTextInput = currentSettings?.richTextInput ?? true;
 		showFormattingToolbar = currentSettings?.showFormattingToolbar ?? false;
@@ -958,6 +966,102 @@
 				{$i18n.t('settings.personal.interface.temporaryChatByDefault.description')}
 			</p>
 		</div>
+	{/if}
+
+	{#if $config?.features?.enable_character_cards}
+		<div>
+			<div class={settingRowClass}>
+				<div id="roleplay-formatting-label" class={settingLabelClass}>
+					{$i18n.t('Roleplay formatting')}
+				</div>
+				<div class={settingControlClass}>
+					<Switch
+						ariaLabelledbyId="roleplay-formatting-label"
+						tooltip={true}
+						bind:state={roleplayFormatting}
+						inherited={isDefaultSetting('roleplayFormatting')}
+						on:change={() => {
+							saveSettings({ roleplayFormatting });
+						}}
+					/>
+				</div>
+			</div>
+			<p class={settingDescriptionClass}>
+				{$i18n.t(
+					'In chats with characters, show *actions* in muted italics and "dialogue" in a stronger color.'
+				)}
+			</p>
+		</div>
+
+		<div>
+			<div class={settingRowClass}>
+				<div id="character-voice-label" class={settingLabelClass}>
+					{$i18n.t('Auto-play character voices')}
+				</div>
+				<div class={settingControlClass}>
+					<Switch
+						ariaLabelledbyId="character-voice-label"
+						tooltip={true}
+						bind:state={autoPlayCharacterVoice}
+						inherited={isDefaultSetting('autoPlayCharacterVoice')}
+						on:change={() => {
+							saveSettings({ autoPlayCharacterVoice });
+						}}
+					/>
+				</div>
+			</div>
+			<p class={settingDescriptionClass}>
+				{$i18n.t('Read replies aloud when the character has its own voice set.')}
+			</p>
+		</div>
+
+		<div>
+			<div class={settingRowClass}>
+				<div id="character-expressions-label" class={settingLabelClass}>
+					{$i18n.t('Character expressions')}
+				</div>
+				<div class={settingControlClass}>
+					<Switch
+						ariaLabelledbyId="character-expressions-label"
+						tooltip={true}
+						bind:state={characterExpressions}
+						inherited={isDefaultSetting('characterExpressions')}
+						on:change={() => {
+							saveSettings({ characterExpressions });
+						}}
+					/>
+				</div>
+			</div>
+			<p class={settingDescriptionClass}>
+				{$i18n.t(
+					"For characters with expression images, pick the one that fits each reply (using the task model) and show it as the character's picture."
+				)}
+			</p>
+		</div>
+
+		{#if characterExpressions}
+			<div>
+				<div class={settingRowClass}>
+					<div id="character-portrait-label" class={settingLabelClass}>
+						{$i18n.t('Show character portrait')}
+					</div>
+					<div class={settingControlClass}>
+						<Switch
+							ariaLabelledbyId="character-portrait-label"
+							tooltip={true}
+							bind:state={characterPortrait}
+							inherited={isDefaultSetting('characterPortrait')}
+							on:change={() => {
+								saveSettings({ characterPortrait });
+							}}
+						/>
+					</div>
+				</div>
+				<p class={settingDescriptionClass}>
+					{$i18n.t("On wide screens, show the character's current expression beside the chat.")}
+				</p>
+			</div>
+		{/if}
 	{/if}
 
 	<div>

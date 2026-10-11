@@ -199,6 +199,8 @@
 	export let imageGenerationEnabled = false;
 	export let webSearchEnabled = false;
 	export let codeInterpreterEnabled = false;
+	// One message out of character (roleplay); Chat.svelte clears it after sending.
+	export let oocEnabled = false;
 	export let toolApprovalMode = 'full';
 	export let onToolApprovalModeChange: Function = () => {};
 
@@ -2513,6 +2515,27 @@
 														<div class="hidden group-hover:block">
 															<XMark className="size-4" strokeWidth="1.75" />
 														</div>
+													</button>
+												</Tooltip>
+											{/if}
+
+											{#if $config?.features?.enable_character_cards && selectedModels.length === 1 && ($models.find((model) => model.id === selectedModels[0]) as any)?.info?.meta?.character}
+												<Tooltip
+													content={$i18n.t(
+														'Out of character: talk to the storyteller about the roleplay instead of to the character'
+													)}
+													placement="top"
+												>
+													<button
+														aria-label={$i18n.t('Out of character')}
+														aria-pressed={oocEnabled}
+														on:click|preventDefault={() => (oocEnabled = !oocEnabled)}
+														type="button"
+														class="px-2 py-[0.3125rem] flex items-center text-xs font-medium rounded-full transition-colors duration-300 focus:outline-hidden {oocEnabled
+															? 'text-amber-600 dark:text-amber-300 bg-amber-50 dark:bg-amber-400/10 border border-amber-200/40 dark:border-amber-500/20'
+															: 'bg-transparent text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800'}"
+													>
+														OOC
 													</button>
 												</Tooltip>
 											{/if}

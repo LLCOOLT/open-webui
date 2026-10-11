@@ -73,7 +73,13 @@ export const skills: Writable<null | any[]> = writable(null);
 export const terminalSkills: Writable<any[]> = writable([]);
 export const functions = writable(null);
 
-export type WorkspaceSection = 'models' | 'knowledge' | 'prompts' | 'skills' | 'tools';
+export type WorkspaceSection =
+	| 'models'
+	| 'knowledge'
+	| 'prompts'
+	| 'skills'
+	| 'tools'
+	| 'lorebooks';
 export type WorkspaceAction = {
 	id: string;
 	label: string;
@@ -87,9 +93,12 @@ export const workspaceCounts: Writable<Record<WorkspaceSection, number | null>> 
 	knowledge: null,
 	prompts: null,
 	skills: null,
-	tools: null
+	tools: null,
+	lorebooks: null
 });
 export const workspaceActions: Writable<WorkspaceAction[]> = writable([]);
+// Persona for the current chat: null uses the default persona, '' none, otherwise a persona id.
+export const chatPersonaId: Writable<string | null> = writable(null);
 export const adminUserCount: Writable<number | null> = writable(null);
 export const adminGroupCount: Writable<number | null> = writable(null);
 export const adminLeaderboardCount: Writable<number | null> = writable(null);
@@ -221,6 +230,17 @@ type OllamaModelDetails = {
 
 type Settings = {
 	pinnedModels?: string[];
+	personas?: {
+		id: string;
+		name: string;
+		description: string;
+		avatar_url?: string | null;
+		is_default?: boolean;
+	}[];
+	roleplayFormatting?: boolean;
+	autoPlayCharacterVoice?: boolean;
+	characterExpressions?: boolean;
+	characterPortrait?: boolean;
 	toolServers?: never[];
 	detectArtifacts?: boolean;
 	showUpdateToast?: boolean;
@@ -346,6 +366,7 @@ type Config = {
 		enable_api_keys: boolean;
 		enable_signup: boolean;
 		enable_login_form: boolean;
+		enable_character_cards?: boolean;
 		enable_web_search?: boolean;
 		enable_web_search_confirmation?: boolean;
 		web_search_confirmation_content?: string;

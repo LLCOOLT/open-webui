@@ -30,6 +30,7 @@ from open_webui.models.chats import (
 )
 from open_webui.models.config import Config
 from open_webui.models.folders import Folders
+from open_webui.models.lorebooks import Lorebooks
 from open_webui.models.shared_chats import SharedChatResponse, SharedChats
 from open_webui.models.tags import TagModel, Tags
 from open_webui.socket.main import get_event_emitter
@@ -41,7 +42,16 @@ from open_webui.utils.chat_fork import build_fork_history
 from open_webui.utils.context_compaction import compact_chat_branch, get_chat_context_usage
 from open_webui.utils.misc import get_message_list
 from open_webui.utils.models import get_all_models
-from pydantic import BaseModel
+from open_webui.utils.roleplay.character import DepthPrompt
+from open_webui.utils.roleplay.filter import get_model_character, skip_character_system_prompt
+from open_webui.utils.roleplay.memory import (
+    branch_message_ids,
+    latest_memory,
+    memory_enabled_for_chat,
+    memory_overrides,
+)
+from open_webui.utils.roleplay.persona import resolve_persona
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -1320,6 +1330,187 @@ async def compact_chat_by_id(
 ############################
 # GetChatById
 ############################
+
+
+############################
+# Roleplay settings (lorebooks attached to a chat, author's note)
+############################
+
+
+class ChatRoleplaySettings(BaseModel):
+    lorebook_ids: list[str] = []
+    authors_note: DepthPrompt | None = None
+    # One of the user's persona ids; '' for none; None for their default persona.
+    persona_id: str | None = None
+    # Long-chat memory for this chat (character chats); on unless turned off.
+    memory_enabled: bool = True
+
+
+def _roleplay_settings(meta: dict) -> ChatRoleplaySettings:
+    try:
+        return ChatRoleplaySettings(
+            lorebook_ids=meta.get('lorebook_ids') or [],
+            authors_note=meta.get('authors_note') or None,
+            persona_id=meta.get('persona_id'),
+            memory_enabled=memory_enabled_for_chat(meta),
+        )
+    except ValueError:
+        return ChatRoleplaySettings()
+
+
+@router.get('/{id}/roleplay', response_model=ChatRoleplaySettings)
+async def get_chat_roleplay_settings(
+    id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+):
+    meta = await Chats.get_chat_meta_by_id_and_user_id(id, user.id, db=db)
+    if meta is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    return _roleplay_settings(meta)
+
+
+@router.post('/{id}/roleplay', response_model=ChatRoleplaySettings)
+async def update_chat_roleplay_settings(
+    id: str,
+    form_data: ChatRoleplaySettings,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    # Only lorebooks the user can read may be attached; others are dropped silently.
+    readable = await Lorebooks.get_readable_lorebooks_by_ids(
+        list(dict.fromkeys(form_data.lorebook_ids)), user.id, db=db
+    )
+    note = form_data.authors_note if form_data.authors_note and form_data.authors_note.text.strip() else None
+    meta = await Chats.update_chat_meta_by_id_and_user_id(
+        id,
+        user.id,
+        {
+            'lorebook_ids': [lorebook.id for lorebook in readable],
+            'authors_note': note.model_dump() if note else None,
+            'persona_id': form_data.persona_id,
+            'memory_enabled': form_data.memory_enabled,
+        },
+        db=db,
+    )
+    if meta is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    return _roleplay_settings(meta)
+
+
+class ChatMemoryResponse(BaseModel):
+    available: bool  # roleplay memory is enabled on this server
+    enabled: bool  # ... and for this chat
+    summary: str | None = None
+    message_id: str | None = None  # the checkpoint: messages before it are covered by the summary
+    summarized_messages: int = 0
+    total_messages: int = 0
+    token_threshold: int = 0
+
+
+class ChatMemoryForm(BaseModel):
+    summary: str = Field(default='', max_length=50_000)
+
+
+async def _chat_branch(id: str, user, db):
+    chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    history = (chat.chat or {}).get('history') or {}
+    messages_map = await Chats.get_messages_map_by_chat_id(id) or history.get('messages') or {}
+    current_id = chat.current_message_id or history.get('currentId')
+    return chat, messages_map, current_id
+
+
+async def _chat_memory(chat, messages_map: dict, current_id: str | None) -> ChatMemoryResponse:
+    try:
+        threshold = int(await Config.get('characters.memory.token_threshold') or 0)
+    except (TypeError, ValueError):
+        threshold = 0
+    return ChatMemoryResponse(
+        available=bool(await Config.get('characters.memory.enable')),
+        enabled=memory_enabled_for_chat(chat.meta or {}),
+        token_threshold=threshold,
+        **latest_memory(messages_map, current_id),
+    )
+
+
+@router.get('/{id}/roleplay/memory', response_model=ChatMemoryResponse)
+async def get_chat_memory(id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
+    """The story memory in effect on the chat's current branch."""
+    chat, messages_map, current_id = await _chat_branch(id, user, db)
+    return await _chat_memory(chat, messages_map, current_id)
+
+
+@router.post('/{id}/roleplay/memory', response_model=ChatMemoryResponse)
+async def update_chat_memory(
+    id: str,
+    form_data: ChatMemoryForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Edit the current memory; an empty summary clears it, so the full history is sent again."""
+    chat, messages_map, current_id = await _chat_branch(id, user, db)
+    memory = latest_memory(messages_map, current_id)
+    if not memory['message_id']:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail='This chat has no memory yet. Use Update now to create one.'
+        )
+    summary = form_data.summary.strip()
+    if summary:
+        targets = [memory['message_id']]
+    else:
+        # Clearing removes every checkpoint on the branch; otherwise an older one would take over.
+        targets = [
+            key
+            for key in branch_message_ids(messages_map, current_id)
+            if (messages_map[key] or {}).get('contextSummary') or (messages_map[key] or {}).get('context_summary')
+        ]
+    for message_id in targets:
+        await Chats.upsert_message_to_chat_by_id_and_message_id(
+            id, message_id, {'contextSummary': summary, 'context_summary': None}, touch=False
+        )
+    chat, messages_map, current_id = await _chat_branch(id, user, db)
+    return await _chat_memory(chat, messages_map, current_id)
+
+
+@router.post('/{id}/roleplay/memory/refresh', response_model=ChatMemoryResponse)
+async def refresh_chat_memory(
+    request: Request, id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+):
+    """Summarize the older part of the current branch into the story memory now."""
+    chat, messages_map, current_id = await _chat_branch(id, user, db)
+    if await has_active_tasks(request.app.state.redis, id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail='Wait for the current response to finish first.'
+        )
+    if not request.app.state.MODELS:
+        await get_all_models(request, user=user)
+    message_list = [messages_map[key] for key in branch_message_ids(messages_map, current_id)]
+    model_id = next((m.get('model') for m in reversed(message_list) if m.get('model')), None) or next(
+        iter((chat.chat or {}).get('models') or []), None
+    )
+    model = request.app.state.MODELS.get(model_id) if model_id else None
+    if not model:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='No model found for this chat.')
+
+    character = get_model_character(model)
+    char = character.display_name(model.get('name') or '') if character else model.get('name') or ''
+    persona = resolve_persona(user, (chat.meta or {}).get('persona_id'))
+    settings = await memory_overrides(char, (persona or {}).get('name') or user.name, {})
+    if settings is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Roleplay memory is turned off.')
+    settings.pop('label', None)
+    # The summary request may go to the character model itself; it must not get the character prompt.
+    skip_character_system_prompt(request, model_id)
+    try:
+        result = await compact_chat_branch(
+            request, user, chat, model_id, request.app.state.MODELS, overrides=settings, keep_recent=True
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+    if not result.get('compacted'):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='The chat is too short to summarize yet.')
+    chat, messages_map, current_id = await _chat_branch(id, user, db)
+    return await _chat_memory(chat, messages_map, current_id)
 
 
 @router.get('/{id}', response_model=ChatResponse | None)

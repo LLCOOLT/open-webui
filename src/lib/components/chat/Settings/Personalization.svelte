@@ -11,6 +11,7 @@
 	import DropdownMenu from '$lib/components/common/DropdownMenu.svelte';
 	import ExperimentalBadge from '$lib/components/common/ExperimentalBadge.svelte';
 	import MemoryModal from './Personalization/MemoryModal.svelte';
+	import Personas from './Personas.svelte';
 	import { deleteMemoriesByUserId, deleteMemoryById, getMemories } from '$lib/apis/memories';
 	import { toast } from 'svelte-sonner';
 	import UserSettingRow from './UserSettingRow.svelte';
@@ -269,6 +270,10 @@
 				</div>
 			{/if}
 		</UserSettingSection>
+
+		{#if $config?.features?.enable_character_cards}
+			<Personas {saveSettings} />
+		{/if}
 	</div>
 
 	<div class="shrink-0 flex justify-end text-sm font-normal">

@@ -1,197 +1,163 @@
 import CRC32 from 'crc-32';
+import JSZip from 'jszip';
 
-export const parseFile = async (file) => {
-	if (file.type === 'application/json') {
-		return await parseJsonFile(file);
-	} else if (file.type === 'image/png') {
-		return await parsePngFile(file);
-	} else {
-		throw new Error('Unsupported file type');
-	}
+// Client-side preview of a character card before import. The server parses and validates the
+// card itself (backend/open_webui/utils/roleplay/cards.py); this only reads enough to show the
+// admin what they are about to import.
+
+export type CharacterPreview = {
+	file: File;
+	name: string;
+	description: string;
+	creatorNotes: string;
+	spec: string;
+	greetingCount: number;
+	lorebookEntryCount: number;
+	image: string | null;
+	error: string | null;
 };
 
-const parseJsonFile = async (file) => {
-	const text = await file.text();
-	const json = JSON.parse(text);
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+const ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04];
 
-	const character = extractCharacter(json);
+const startsWith = (data: Uint8Array, signature: number[]) =>
+	signature.every((byte, index) => data[index] === byte);
 
-	return {
-		file,
-		json,
-		formats: detectFormats(json),
-		character
-	};
-};
+const readPngTextChunks = (data: Uint8Array): Record<string, string> => {
+	const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+	const texts: Record<string, string> = {};
+	let offset = PNG_SIGNATURE.length;
 
-const parsePngFile = async (file) => {
-	const arrayBuffer = await file.arrayBuffer();
-	const text = parsePngText(arrayBuffer);
-	const json = JSON.parse(text);
+	while (offset + 12 <= data.length) {
+		const length = view.getUint32(offset);
+		const typeBytes = data.subarray(offset + 4, offset + 8);
+		const type = String.fromCharCode(...typeBytes);
+		const end = offset + 8 + length;
+		if (end + 4 > data.length) throw new Error('Truncated PNG file');
 
-	const image = URL.createObjectURL(file);
-	const character = extractCharacter(json);
+		const chunk = data.subarray(offset + 8, end);
+		// CRC32.buf returns a signed 32-bit integer; compare as unsigned.
+		const crc = CRC32.buf(chunk, CRC32.buf(typeBytes)) >>> 0;
+		if (crc !== view.getUint32(end)) throw new Error(`Invalid CRC for PNG chunk "${type}"`);
 
-	return {
-		file,
-		json,
-		image,
-		formats: detectFormats(json),
-		character
-	};
-};
-
-const parsePngText = (arrayBuffer) => {
-	const textChunkKeyword = 'chara';
-	const chunks = readPngChunks(new Uint8Array(arrayBuffer));
-
-	const textChunk = chunks
-		.filter((chunk) => chunk.type === 'tEXt')
-		.map((chunk) => decodeTextChunk(chunk.data))
-		.find((entry) => entry.keyword === textChunkKeyword);
-
-	if (!textChunk) {
-		throw new Error(`No PNG text chunk named "${textChunkKeyword}" found`);
-	}
-
-	try {
-		return new TextDecoder().decode(Uint8Array.from(atob(textChunk.text), (c) => c.charCodeAt(0)));
-	} catch (e) {
-		throw new Error('Unable to parse "chara" field as base64', e);
-	}
-};
-
-const readPngChunks = (data) => {
-	const isValidPng =
-		data[0] === 0x89 &&
-		data[1] === 0x50 &&
-		data[2] === 0x4e &&
-		data[3] === 0x47 &&
-		data[4] === 0x0d &&
-		data[5] === 0x0a &&
-		data[6] === 0x1a &&
-		data[7] === 0x0a;
-
-	if (!isValidPng) throw new Error('Invalid PNG file');
-
-	const chunks = [];
-	let offset = 8; // Skip PNG signature
-
-	while (offset < data.length) {
-		const length =
-			(data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
-		const type = String.fromCharCode.apply(null, data.slice(offset + 4, offset + 8));
-		const chunkData = data.slice(offset + 8, offset + 8 + length);
-		const crc =
-			(data[offset + 8 + length] << 24) |
-			(data[offset + 8 + length + 1] << 16) |
-			(data[offset + 8 + length + 2] << 8) |
-			data[offset + 8 + length + 3];
-
-		if (CRC32.buf(chunkData, CRC32.str(type)) !== crc) {
-			throw new Error(`Invalid CRC for chunk type "${type}"`);
+		if (type === 'tEXt') {
+			const separator = chunk.indexOf(0);
+			if (separator > 0) {
+				const keyword = String.fromCharCode(...chunk.subarray(0, separator));
+				texts[keyword] ??= new TextDecoder('latin1').decode(chunk.subarray(separator + 1));
+			}
 		}
-
-		chunks.push({ type, data: chunkData, crc });
-		offset += 12 + length;
+		if (type === 'IEND') break;
+		offset = end + 4;
 	}
-
-	return chunks;
+	return texts;
 };
 
-const decodeTextChunk = (data) => {
-	let i = 0;
-	const keyword = [];
-	const text = [];
-
-	for (; i < data.length && data[i] !== 0; i++) {
-		keyword.push(String.fromCharCode(data[i]));
-	}
-
-	for (i++; i < data.length; i++) {
-		text.push(String.fromCharCode(data[i]));
-	}
-
-	return { keyword: keyword.join(''), text: text.join('') };
+const decodeCardText = (text: string) => {
+	const trimmed = text.trim();
+	if (trimmed.startsWith('{')) return JSON.parse(trimmed);
+	const bytes = Uint8Array.from(atob(trimmed), (char) => char.charCodeAt(0));
+	return JSON.parse(new TextDecoder().decode(bytes));
 };
 
-const extractCharacter = (json) => {
-	function getTrimmedValue(json, keys) {
-		return keys
-			.map((key) => {
-				const keyParts = key.split('.');
-				let value = json;
-				for (const part of keyParts) {
-					if (value && value[part] != null) {
-						value = value[part];
-					} else {
-						value = null;
-						break;
-					}
-				}
-				return value && value.trim();
-			})
-			.find((value) => value);
+const text = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+
+const summarize = (card: any) => {
+	if (card?.spec === 'chara_card_v3' || card?.spec === 'chara_card_v2' || card?.data?.name) {
+		const data = card.data ?? {};
+		const greetings = [data.first_mes, ...(data.alternate_greetings ?? [])];
+		return {
+			spec: card.spec === 'chara_card_v3' ? 'V3' : 'V2',
+			name: text(data.name),
+			description: text(data.description),
+			creatorNotes: text(data.creator_notes),
+			greetingCount: greetings.filter((greeting) => text(greeting)).length,
+			lorebookEntryCount: Object.keys(data.character_book?.entries ?? {}).length
+		};
 	}
-
-	const name = getTrimmedValue(json, ['char_name', 'name', 'data.name']);
-	const summary = getTrimmedValue(json, ['personality', 'title', 'data.description']);
-	const personality = getTrimmedValue(json, ['char_persona', 'description', 'data.personality']);
-	const scenario = getTrimmedValue(json, ['world_scenario', 'scenario', 'data.scenario']);
-	const greeting = getTrimmedValue(json, [
-		'char_greeting',
-		'greeting',
-		'first_mes',
-		'data.first_mes'
-	]);
-	const examples = getTrimmedValue(json, [
-		'example_dialogue',
-		'mes_example',
-		'definition',
-		'data.mes_example'
-	]);
-
-	return { name, summary, personality, scenario, greeting, examples };
+	if (card?.char_name) {
+		return {
+			spec: 'Text Generation',
+			name: text(card.char_name),
+			description: text(card.char_persona),
+			creatorNotes: '',
+			greetingCount: text(card.char_greeting) ? 1 : 0,
+			lorebookEntryCount: 0
+		};
+	}
+	const character = card?.character ?? card?.info?.character;
+	if (character) {
+		return {
+			spec: 'Character.AI',
+			name: text(character.name),
+			description: text(character.description),
+			creatorNotes: text(character.title),
+			greetingCount: text(character.greeting) ? 1 : 0,
+			lorebookEntryCount: 0
+		};
+	}
+	return {
+		spec: 'V1',
+		name: text(card?.name),
+		description: text(card?.description),
+		creatorNotes: '',
+		greetingCount: text(card?.first_mes) ? 1 : 0,
+		lorebookEntryCount: 0
+	};
 };
 
-const detectFormats = (json) => {
-	const formats = [];
+const charxIcon = async (zip: JSZip, card: any): Promise<string | null> => {
+	const assets: any[] = card?.data?.assets ?? [];
+	const icons = assets.filter((asset) => asset?.type === 'icon');
+	const icon = icons.find((asset) => asset?.name === 'main') ?? icons[0];
+	const uri: string = icon?.uri ?? '';
+	const prefix = ['embeded://', 'embedded://'].find((value) => uri.startsWith(value));
+	const entry = prefix ? zip.file(uri.slice(prefix.length).replace(/^\//, '')) : null;
+	return entry ? URL.createObjectURL(await entry.async('blob')) : null;
+};
 
-	if (
-		json.char_name &&
-		json.char_persona &&
-		json.world_scenario &&
-		json.char_greeting &&
-		json.example_dialogue
-	)
-		formats.push('Text Generation Character');
-	if (
-		json.name &&
-		json.personality &&
-		json.description &&
-		json.scenario &&
-		json.first_mes &&
-		json.mes_example
-	)
-		formats.push('TavernAI Character');
-	if (
-		json.character &&
-		json.character.name &&
-		json.character.title &&
-		json.character.description &&
-		json.character.greeting &&
-		json.character.definition
-	)
-		formats.push('CharacterAI Character');
-	if (
-		json.info &&
-		json.info.character &&
-		json.info.character.name &&
-		json.info.character.title &&
-		json.info.character.description &&
-		json.info.character.greeting
-	)
-		formats.push('CharacterAI History');
+const readCard = async (file: File): Promise<{ card: any; image: string | null }> => {
+	const data = new Uint8Array(await file.arrayBuffer());
 
-	return formats;
+	if (startsWith(data, PNG_SIGNATURE)) {
+		const texts = readPngTextChunks(data);
+		const cardText = texts['ccv3'] ?? texts['chara'];
+		if (!cardText) throw new Error('This PNG does not contain a character card');
+		return { card: decodeCardText(cardText), image: URL.createObjectURL(file) };
+	}
+
+	if (startsWith(data, ZIP_SIGNATURE)) {
+		const zip = await JSZip.loadAsync(data);
+		const cardFile = zip.file('card.json');
+		if (!cardFile) throw new Error('This archive has no card.json');
+		const card = JSON.parse(await cardFile.async('string'));
+		return { card, image: await charxIcon(zip, card) };
+	}
+
+	return { card: JSON.parse(new TextDecoder().decode(data).replace(/^\uFEFF/, '')), image: null };
+};
+
+export const previewCharacterFile = async (file: File): Promise<CharacterPreview> => {
+	const empty = {
+		file,
+		name: file.name,
+		description: '',
+		creatorNotes: '',
+		spec: '',
+		greetingCount: 0,
+		lorebookEntryCount: 0,
+		image: null
+	};
+	try {
+		const { card, image } = await readCard(file);
+		const summary = summarize(card);
+		if (!summary.name) throw new Error('The card has no name');
+		return { ...empty, ...summary, image, error: null };
+	} catch (error) {
+		return { ...empty, error: error instanceof Error ? error.message : `${error}` };
+	}
+};
+
+export const revokePreviewImage = (preview: CharacterPreview) => {
+	if (preview.image) URL.revokeObjectURL(preview.image);
 };

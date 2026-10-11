@@ -45,6 +45,7 @@ from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_system_prompt_to_body,
 )
+from open_webui.utils.roleplay.filter import character_system_prompt_applied
 from open_webui.utils.session_pool import cleanup_response, get_client_timeout, get_session, stream_wrapper
 from pydantic import BaseModel, ConfigDict, validator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1145,7 +1146,7 @@ async def generate_chat_completion(
         if params:
             system = params.pop('system', None)
             payload = apply_model_params_to_body_ollama(params, payload)
-            if not bypass_system_prompt:
+            if not bypass_system_prompt and not character_system_prompt_applied(request, model_info.id):
                 payload = await apply_system_prompt_to_body(system, payload, metadata, user)
 
         await check_model_access(user, model_info, bypass_filter)
@@ -1349,7 +1350,8 @@ async def generate_openai_chat_completion(
         if params:
             system = params.pop('system', None)
             payload = apply_model_params_to_body_openai(params, payload)
-            payload = await apply_system_prompt_to_body(system, payload, metadata, user)
+            if not character_system_prompt_applied(request, model_info.id):
+                payload = await apply_system_prompt_to_body(system, payload, metadata, user)
 
         await check_model_access(user, model_info)
     else:

@@ -27,6 +27,8 @@
 	export let shareHandler: Function;
 	export let cloneHandler: Function;
 	export let exportHandler: Function;
+	// Set for character models the user can write; exports a character card.
+	export let exportCharacterHandler: ((format: 'png' | 'json') => void) | null = null;
 	export let copyLinkHandler: Function;
 
 	export let hideHandler: Function;
@@ -179,6 +181,19 @@
 
 					<div class="flex items-center">{$i18n.t('Export')}</div>
 				</button>
+			{/if}
+
+			{#if writeAccess && exportCharacterHandler}
+				{#each [{ format: 'png' as const, label: $i18n.t('Export Card (PNG)') }, { format: 'json' as const, label: $i18n.t('Export Card (JSON)') }] as item}
+					<button
+						class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] hover:text-gray-900 dark:hover:text-gray-100"
+						on:click={() => runAndClose(() => exportCharacterHandler(item.format))}
+					>
+						<Download />
+
+						<div class="flex items-center">{item.label}</div>
+					</button>
+				{/each}
 			{/if}
 
 			{#if writeAccess && $config?.features.enable_community_sharing}

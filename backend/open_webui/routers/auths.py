@@ -78,7 +78,7 @@ from open_webui.utils.groups import apply_default_group_assignment
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.misc import parse_duration, validate_email_format
 from open_webui.utils.rate_limit import RateLimiter
-from pydantic import BaseModel, StrictStr, field_validator
+from pydantic import BaseModel, Field, StrictStr, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -128,6 +128,12 @@ ADMIN_CONFIG_KEYS = {
     'ENABLE_MEMORIES': 'memories.enable',
     'ENABLE_MEMORY_SYSTEM_CONTEXT': 'memories.system_context.enable',
     'ENABLE_NOTES': 'notes.enable',
+    'ENABLE_CHARACTER_CARDS': 'characters.enable',
+    'CHARACTER_DEFAULT_SYSTEM_PROMPT': 'characters.default_system_prompt',
+    'CHARACTER_OOC_PROMPT': 'characters.ooc_prompt',
+    'ENABLE_CHARACTER_MEMORY': 'characters.memory.enable',
+    'CHARACTER_MEMORY_TOKEN_THRESHOLD': 'characters.memory.token_threshold',
+    'CHARACTER_MEMORY_PROMPT': 'characters.memory.prompt',
     'ENABLE_USER_WEBHOOKS': 'ui.enable_user_webhooks',
     'ENABLE_USER_STATUS': 'users.enable_status',
     'PENDING_USER_OVERLAY_TITLE': 'ui.pending_user_overlay_title',
@@ -1233,6 +1239,12 @@ class AdminConfig(BaseModel):
     ENABLE_MEMORIES: bool
     ENABLE_MEMORY_SYSTEM_CONTEXT: bool
     ENABLE_NOTES: bool
+    ENABLE_CHARACTER_CARDS: bool | None = None
+    CHARACTER_DEFAULT_SYSTEM_PROMPT: str | None = None
+    CHARACTER_OOC_PROMPT: str | None = None
+    ENABLE_CHARACTER_MEMORY: bool | None = None
+    CHARACTER_MEMORY_TOKEN_THRESHOLD: int | None = Field(default=None, ge=1000, le=2_000_000)
+    CHARACTER_MEMORY_PROMPT: str | None = None
     ENABLE_USER_WEBHOOKS: bool
     ENABLE_USER_STATUS: bool
     PENDING_USER_OVERLAY_TITLE: str | None = None
@@ -1273,6 +1285,17 @@ async def update_admin_config(request: Request, form_data: AdminConfig, user=Dep
         updates.pop('ui.enable_login_form', None)
     if 'I18N' not in form_data.model_fields_set:
         updates.pop('ui.i18n', None)
+    # Older clients do not send the character settings; keep the stored values.
+    for field, key in (
+        ('ENABLE_CHARACTER_CARDS', 'characters.enable'),
+        ('CHARACTER_DEFAULT_SYSTEM_PROMPT', 'characters.default_system_prompt'),
+        ('CHARACTER_OOC_PROMPT', 'characters.ooc_prompt'),
+        ('ENABLE_CHARACTER_MEMORY', 'characters.memory.enable'),
+        ('CHARACTER_MEMORY_TOKEN_THRESHOLD', 'characters.memory.token_threshold'),
+        ('CHARACTER_MEMORY_PROMPT', 'characters.memory.prompt'),
+    ):
+        if getattr(form_data, field) is None:
+            updates.pop(key, None)
     updates['ui.default_interface_settings'] = form_data.DEFAULT_INTERFACE_SETTINGS or {}
     updates['folders.max_file_count'] = int(form_data.FOLDER_MAX_FILE_COUNT) if form_data.FOLDER_MAX_FILE_COUNT else ''
     updates['automations.max_count'] = int(form_data.AUTOMATION_MAX_COUNT) if form_data.AUTOMATION_MAX_COUNT else ''

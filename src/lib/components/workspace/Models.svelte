@@ -25,6 +25,7 @@
 	} from '$lib/stores';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 	import {
+		exportCharacterCard,
 		exportModels,
 		importModels,
 		deleteModelById,
@@ -49,6 +50,7 @@
 	import CheckCircle from '../icons/CheckCircle.svelte';
 	import Minus from '../icons/Minus.svelte';
 	import ModelMenu from './Models/ModelMenu.svelte';
+	import CharacterImportModal from './Models/CharacterImportModal.svelte';
 	import ModelDeleteConfirmDialog from '../common/ConfirmDialog.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
 	import GarbageBin from '../icons/GarbageBin.svelte';
@@ -78,6 +80,7 @@
 	let loaded = false;
 
 	let showModelDeleteConfirm = false;
+	let showCharacterImport = false;
 
 	let selectedModel = null;
 
@@ -109,6 +112,25 @@
 				label: $i18n.t('Import JSON'),
 				onClick: () => modelsImportInputElement?.click(),
 				visible: $user?.role === 'admin' || $user?.permissions?.workspace?.models_import
+			},
+			{
+				id: 'models-import-characters',
+				label: $i18n.t('Import Character Cards'),
+				onClick: () => (showCharacterImport = true),
+				// Admin only by design: no permission grants character card import.
+				visible: $user?.role === 'admin' && ($config?.features?.enable_character_cards ?? false)
+			},
+			{
+				id: 'models-browse-cards',
+				label: $i18n.t('Browse Character Cards'),
+				href: '/workspace/models/browse',
+				visible: $user?.role === 'admin' && ($config?.features?.enable_character_cards ?? false)
+			},
+			{
+				id: 'models-story',
+				label: $i18n.t('Create from Story'),
+				href: '/workspace/models/story',
+				visible: $user?.role === 'admin' && ($config?.features?.enable_character_cards ?? false)
 			},
 			{
 				id: 'models-export',
@@ -312,6 +334,26 @@
 		saveAs(blob, `${model.id}-${Date.now()}.json`);
 	};
 
+	const exportCharacterHandler = async (model, format: 'png' | 'json') => {
+		try {
+			const { blob, filename, rawTruncated } = await exportCharacterCard(
+				localStorage.token,
+				model.id,
+				format
+			);
+			saveAs(blob, filename);
+			if (rawTruncated) {
+				toast.warning(
+					$i18n.t(
+						'The original card was too large to keep in full; fields this app does not edit were not exported.'
+					)
+				);
+			}
+		} catch (error: any) {
+			toast.error(`${error?.detail ?? error}`);
+		}
+	};
+
 	const pinModelHandler = async (modelId) => {
 		settings.set({
 			...$settings,
@@ -462,6 +504,20 @@
 </svelte:head>
 
 {#if loaded}
+	<CharacterImportModal
+		bind:show={showCharacterImport}
+		onImported={async () => {
+			await _models.set(
+				await getModels(
+					localStorage.token,
+					$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
+				)
+			);
+			page = 1;
+			getModelList();
+		}}
+	/>
+
 	<ModelDeleteConfirmDialog
 		bind:show={showModelDeleteConfirm}
 		on:confirm={() => {
@@ -864,6 +920,10 @@
 												exportHandler={() => {
 													exportModelHandler(model);
 												}}
+												exportCharacterHandler={model.meta?.character &&
+												$config?.features?.enable_character_cards
+													? (format) => exportCharacterHandler(model, format)
+													: null}
 												hideHandler={() => {
 													hideModelHandler(model);
 												}}

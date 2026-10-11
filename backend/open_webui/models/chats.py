@@ -917,6 +917,13 @@ class ChatTable:
             for message_id, message in {**existing, **incoming}.items()
             if isinstance(message, dict)
         }
+        # Compaction writes its summary onto an older message server side; a client copy of that
+        # message that never had the key must not erase it (an explicit value, e.g. '', still wins).
+        for message_id, message in merged.items():
+            stored = existing.get(message_id)
+            if message_id in incoming and isinstance(stored, dict) and 'contextSummary' not in message:
+                if 'contextSummary' in stored:
+                    message['contextSummary'] = stored['contextSummary']
 
         for message_id, message in merged.items():
             parent_id = message.get('parentId')
@@ -2366,6 +2373,27 @@ class ChatTable:
                     await session.commit()
         except Exception:
             return None
+
+    async def get_chat_meta_by_id_and_user_id(
+        self, id: str, user_id: str, db: AsyncSession | None = None
+    ) -> dict | None:
+        """Only the meta column of a chat the user owns; None when it does not exist."""
+        async with get_async_db_context(db) as session:
+            row = (await session.execute(select(Chat.meta).filter_by(id=id, user_id=user_id))).one_or_none()
+            return (row[0] or {}) if row is not None else None
+
+    async def update_chat_meta_by_id_and_user_id(
+        self, id: str, user_id: str, updates: dict, db: AsyncSession | None = None
+    ) -> dict | None:
+        """Merge ``updates`` into a chat's meta. Meta-column-only, never the blob."""
+        async with get_async_db_context(db) as session:
+            row = (await session.execute(select(Chat.meta).filter_by(id=id, user_id=user_id))).one_or_none()
+            if row is None:
+                return None
+            meta = {**(row[0] or {}), **updates}
+            await session.execute(update(Chat).filter_by(id=id).values(meta=meta))
+            await session.commit()
+            return meta
 
     async def count_chats_by_tag_name_and_user_id(
         self, tag_name: str, user_id: str, db: AsyncSession | None = None

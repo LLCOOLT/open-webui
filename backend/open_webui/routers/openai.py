@@ -50,6 +50,7 @@ from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_system_prompt_to_body,
 )
+from open_webui.utils.roleplay.filter import character_system_prompt_applied
 from open_webui.utils.session_pool import (
     cleanup_response,
     get_client_timeout,
@@ -1529,7 +1530,7 @@ async def generate_chat_completion(
             system = params.pop('system', None)
 
             payload = apply_model_params_to_body_openai(params, payload)
-            if not bypass_system_prompt:
+            if not bypass_system_prompt and not character_system_prompt_applied(request, model_info.id):
                 payload = await apply_system_prompt_to_body(system, payload, metadata, user)
 
         await check_model_access(user, model_info, bypass_filter)

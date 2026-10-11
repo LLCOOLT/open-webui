@@ -196,6 +196,7 @@ class WorkspacePermissions(BaseModel):
     prompts: bool = False
     tools: bool = False
     skills: bool = False
+    lorebooks: bool = False
     models_import: bool = False
     models_export: bool = False
     prompts_import: bool = False
@@ -217,6 +218,8 @@ class SharingPermissions(BaseModel):
     public_tools: bool = False
     skills: bool = False
     public_skills: bool = False
+    lorebooks: bool = False
+    public_lorebooks: bool = False
     notes: bool = False
     public_notes: bool = False
     folders: bool = False
