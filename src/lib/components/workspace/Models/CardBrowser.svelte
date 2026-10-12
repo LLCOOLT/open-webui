@@ -1,4 +1,6 @@
 <script lang="ts">
+	import CardText from './CardText.svelte';
+	import { cardPlainText } from '$lib/utils/cardText';
 	import { getContext, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
@@ -79,11 +81,16 @@
 		: [];
 	$: previewSections = preview
 		? [
-				{ label: $i18n.t('Description'), text: preview.description },
-				{ label: $i18n.t('Personality'), text: preview.personality },
-				{ label: $i18n.t('Scenario'), text: preview.scenario },
-				{ label: $i18n.t('Example Dialogue'), text: preview.mes_example },
-				{ label: $i18n.t('Character System Prompt'), text: preview.system_prompt }
+				// Prompt-like fields stay as written; the rest render like the card's author laid them out.
+				{ label: $i18n.t('Description'), text: preview.description, rendered: true },
+				{ label: $i18n.t('Personality'), text: preview.personality, rendered: true },
+				{ label: $i18n.t('Scenario'), text: preview.scenario, rendered: true },
+				{ label: $i18n.t('Example Dialogue'), text: preview.mes_example, rendered: false },
+				{
+					label: $i18n.t('Character System Prompt'),
+					text: preview.system_prompt,
+					rendered: false
+				}
 			].filter((section) => section.text?.trim())
 		: [];
 
@@ -539,7 +546,7 @@
 							class="mt-1 text-left text-xs text-gray-600 dark:text-gray-400 whitespace-pre-line line-clamp-3 hover:text-gray-900 dark:hover:text-gray-200"
 							on:click={() => openPreview(item)}
 						>
-							{item.tagline}
+							{cardPlainText(item.tagline)}
 						</button>
 					{/if}
 
@@ -751,9 +758,7 @@
 					{#if preview.creator_notes?.trim()}
 						<section>
 							<div class="text-xs font-medium text-gray-500 mb-1">{$i18n.t('Creator Notes')}</div>
-							<div class="whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300">
-								{preview.creator_notes}
-							</div>
+							<CardText text={preview.creator_notes} />
 						</section>
 					{/if}
 					{#if greetings.length}
@@ -780,19 +785,21 @@
 									</span>
 								{/if}
 							</div>
-							<div
-								class="whitespace-pre-wrap break-words rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2"
-							>
-								{expand(greetings[Math.min(greetingIndex, greetings.length - 1)])}
+							<div class="rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2">
+								<CardText text={expand(greetings[Math.min(greetingIndex, greetings.length - 1)])} />
 							</div>
 						</section>
 					{/if}
 					{#each previewSections as section (section.label)}
 						<section>
 							<div class="text-xs font-medium text-gray-500 mb-1">{section.label}</div>
-							<div class="whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300">
-								{expand(section.text)}
-							</div>
+							{#if section.rendered}
+								<CardText text={expand(section.text)} />
+							{:else}
+								<div class="whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300">
+									{expand(section.text)}
+								</div>
+							{/if}
 						</section>
 					{/each}
 					{#if !greetings.length && !previewSections.length}
