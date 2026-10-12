@@ -638,19 +638,604 @@ async def _poe_download(handle: str) -> tuple[bytes, str]:
     if handle.lower() in POE_RESERVED:
         raise SourceError('That is not a Poe bot link.')
     bot = await _poe_bot(handle)
-    card_json = json.dumps(poe_card(bot), ensure_ascii=False)
-    picture = _text((bot.get('picture') or {}).get('url'))
+    return await _card_file(poe_card(bot), _text((bot.get('picture') or {}).get('url')), POE_HOSTS)
+
+
+async def _card_file(card: dict, image_url: str, hosts: tuple[str, ...]) -> tuple[bytes, str]:
+    """A card built from a site's API data, as a PNG card with its picture when there is one."""
+    card_json = json.dumps(card, ensure_ascii=False)
     png = None
-    if picture and _allowed(picture, POE_HOSTS):
+    if image_url and _allowed(image_url, hosts):
         try:
-            image, _ = await _get(picture, POE_HOSTS, CHARACTER_CARD_MAX_BYTES)
+            image, _ = await _get(image_url, hosts, CHARACTER_CARD_MAX_BYTES)
             png = _to_png(image)
         except SourceError as error:
-            log.info('Importing Poe bot %s without its picture: %s', handle, error)
+            log.info('Importing %s without its picture: %s', card.get('data', {}).get('name'), error)
     if png is None:
         return card_json.encode('utf-8'), 'card.json'
     encoded = base64.b64encode(card_json.encode('utf-8')).decode('ascii')
     return write_png_text_chunks(png, {'chara': encoded}), 'card.png'
+
+
+def _v2_card(**data) -> dict:
+    """A V2 card from the fields given; the rest empty."""
+    fields = {
+        'name': '',
+        'description': '',
+        'personality': '',
+        'scenario': '',
+        'first_mes': '',
+        'mes_example': '',
+        'creator_notes': '',
+        'system_prompt': '',
+        'post_history_instructions': '',
+        'alternate_greetings': [],
+        'tags': [],
+        'creator': '',
+        'character_version': '',
+        'extensions': {},
+    }
+    fields.update({key: value for key, value in data.items() if value is not None})
+    return {'spec': 'chara_card_v2', 'spec_version': '2.0', 'data': fields}
+
+
+####################
+# Pygmalion (pygmalion.chat): public Connect-RPC API, JSON over GET
+####################
+
+PYG_API = 'https://server.pygmalion.chat/galatea.v1.PublicCharacterService'
+PYG_HOSTS = ('pygmalion.chat',)
+PYG_ID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+PYG_SORTS = {'popular': 'downloads', 'newest': 'approved_at', 'trending': 'stars'}
+
+
+async def _pyg_call(method: str, message: dict):
+    query = urlencode({'connect': 'v1', 'encoding': 'json', 'message': json.dumps(message)})
+    return await _get_json(f'{PYG_API}/{method}?{query}', PYG_HOSTS)
+
+
+def _pyg_summary(character: dict) -> CardSummary | None:
+    card_id = _text(character.get('id'))
+    if not PYG_ID.match(card_id):
+        return None
+    owner = character.get('owner') or {}
+    tokens = character.get('personalityTokenCount')
+    return CardSummary(
+        source='pygmalion',
+        id=card_id,
+        name=_text(character.get('displayName')) or 'Unnamed',
+        tagline=_text(character.get('description'))[:300],
+        creator=_text(owner.get('displayName')) or _text(owner.get('username')),
+        tags=_strings(character.get('tags')),
+        image_url=_text(character.get('avatarUrl')),
+        page_url=f'https://pygmalion.chat/character/{card_id}',
+        nsfw=bool(character.get('isSensitive')),
+        tokens=int(tokens) if str(tokens or '').isdigit() else None,
+        downloads=str(character.get('downloads') or ''),
+    )
+
+
+async def _pyg_search(query: str, page: int, sort: str, nsfw: bool, tags: TagFilter) -> SearchPage:
+    message = {
+        'query': query,
+        'page': page - 1,
+        'pageSize': PAGE_SIZE,
+        'orderBy': PYG_SORTS[sort],
+        'orderDescending': True,
+        'includeSensitive': nsfw,
+    }
+    if tags.include:
+        message['tagsNamesInclude'] = tags.include
+        message['tagMatchCountNeeded'] = len(tags.include)
+    if tags.exclude:
+        message['tagsNamesExclude'] = tags.exclude
+    data = await _pyg_call('CharacterSearch', message)
+    characters = data.get('characters') if isinstance(data, dict) else None
+    items = [item for c in characters or [] if isinstance(c, dict) and (item := _pyg_summary(c))]
+    try:
+        total = int(data.get('totalItems') or 0)
+    except (TypeError, ValueError):
+        total = 0
+    return SearchPage(items=items, page=page, has_more=page * PAGE_SIZE < total)
+
+
+def pygmalion_card(character: dict) -> dict:
+    """A V2 card from a Pygmalion character, mapped as the site's own card export does."""
+    personality = character.get('personality') or {}
+    notes = _text(personality.get('characterNotes'))
+    extensions = {'pygmalion_id': _text(character.get('id'))}
+    if notes:
+        extensions['depth_prompt'] = {'prompt': notes, 'depth': 4, 'role': 'system'}
+    return _v2_card(
+        name=_text(character.get('displayName')) or _text(personality.get('name')),
+        description=_text(personality.get('persona')),
+        first_mes=_text(personality.get('greeting')),
+        alternate_greetings=_strings(personality.get('alternateGreetings')),
+        mes_example=_text(personality.get('mesExample')),
+        system_prompt=_text(personality.get('systemPrompt')),
+        post_history_instructions=_text(personality.get('postHistoryInstructions')),
+        creator=_text(personality.get('creator')) or _text((character.get('owner') or {}).get('displayName')),
+        character_version=_text(personality.get('characterVersion')),
+        creator_notes=_text(character.get('description')),
+        tags=_strings(character.get('tags')),
+        extensions=extensions,
+    )
+
+
+async def _pyg_download(card_id: str) -> tuple[bytes, str]:
+    try:
+        data = await _pyg_call('Character', {'characterMetaId': card_id})
+    except SourceError as error:
+        if '500' in str(error):
+            raise SourceError('Pygmalion has no public character with that id.') from error
+        raise
+    character = data.get('character') if isinstance(data, dict) else None
+    if not isinstance(character, dict):
+        raise SourceError('Pygmalion returned no character.')
+    return await _card_file(pygmalion_card(character), _text(character.get('avatarUrl')), PYG_HOSTS)
+
+
+####################
+# Backyard AI hub (backyard.ai): the hub's public tRPC API
+####################
+
+BACKYARD_API = 'https://backyard.ai/api/trpc/hub.browse'
+BACKYARD_HOSTS = ('backyard.ai',)
+BACKYARD_ID = re.compile(r'^c[a-z0-9]{24}$')
+BACKYARD_PAGE = 50  # the hub's own page size; its cursor is an offset
+BACKYARD_SORTS = {'popular': 'Popularity', 'newest': 'Newest', 'trending': 'Trending'}
+# Character placeholders: {_cfg&:<id>:cfg&_} is the character, {user} the user.
+BACKYARD_CHAR_RE = re.compile(r'\{_cfg&:[^:}]*:cfg&_\}')
+
+
+async def _backyard_call(procedure: str, payload: dict):
+    url = f'{BACKYARD_API}.{procedure}?' + urlencode({'input': json.dumps({'json': payload})})
+    data = await _get_json(url, BACKYARD_HOSTS)
+    try:
+        return data['result']['data']['json']
+    except (TypeError, KeyError) as error:
+        raise SourceError('The Backyard hub returned something unexpected.') from error
+
+
+def _backyard_text(text) -> str:
+    text = BACKYARD_CHAR_RE.sub('{{char}}', _text(text))
+    return re.sub(r'(?<!\{)\{user\}(?!\})', '{{user}}', text)
+
+
+def _backyard_summary(group: dict) -> CardSummary | None:
+    characters = [c for c in group.get('CharacterConfigs') or [] if isinstance(c, dict)]
+    card_id = _text(characters[0].get('id')) if characters else _text(group.get('id'))
+    if not BACKYARD_ID.match(card_id):
+        return None
+    images = (characters[0].get('Images') if characters else None) or []
+    image = next((_text(i.get('imageUrl')) for i in images if isinstance(i, dict) and i.get('imageUrl')), '')
+    return CardSummary(
+        source='backyard',
+        id=card_id,
+        name=_text(group.get('name')) or (_text(characters[0].get('name')) if characters else 'Unnamed'),
+        tagline=_text(group.get('tagline'))[:300],
+        creator=_text((group.get('Author') or {}).get('username')),
+        tags=[_text(tag.get('name')) for tag in group.get('Tags') or [] if isinstance(tag, dict) and tag.get('name')],
+        image_url=image,
+        page_url=f'https://backyard.ai/hub/character/{card_id}',
+        nsfw=bool(group.get('isNSFW')),
+        downloads=str(group.get('downloadCount') or ''),
+    )
+
+
+async def _backyard_search(query: str, page: int, sort: str, nsfw: bool, tags: TagFilter) -> SearchPage:
+    payload: dict = {'sortBy': {'type': BACKYARD_SORTS[sort], 'direction': 'desc'}}
+    if page > 1:
+        payload['cursor'] = (page - 1) * BACKYARD_PAGE
+    if len(query) >= 3:
+        procedure = 'getHubGroupConfigsBySearch'
+        payload['query'] = query
+        if sort == 'popular':
+            payload['sortBy']['type'] = 'Relevance'
+    elif tags.include:
+        procedure = 'getHubGroupConfigsForTag'
+        payload.update(tagNames=[tag.lower() for tag in tags.include], type='all')
+    else:
+        procedure = 'getHubGroupConfigsBySortType'
+    data = await _backyard_call(procedure, payload)
+    groups = data.get('hubGroupConfigs') if isinstance(data, dict) else None
+    items = [item for g in groups or [] if isinstance(g, dict) and (item := _backyard_summary(g))]
+    return SearchPage(items=items, page=page, has_more=bool(isinstance(data, dict) and data.get('nextCursor')))
+
+
+def backyard_card(character: dict) -> dict:
+    """A V2 card from a Backyard hub character and its own chat setup (scenario, greetings, examples)."""
+    group = character.get('standaloneGroupConfig') or {}
+    chat = group.get('PrimaryChat') or {}
+    greetings = [
+        _backyard_text(message.get('text'))
+        for message in sorted(
+            (m for m in chat.get('HubGreetingMessages') or [] if isinstance(m, dict)),
+            key=lambda m: str(m.get('position') or ''),
+        )
+        if _text(message.get('text'))
+    ]
+    examples = []
+    for message in sorted(
+        (m for m in chat.get('HubExampleMessages') or [] if isinstance(m, dict)),
+        key=lambda m: str(m.get('position') or ''),
+    ):
+        speaker = '{{user}}' if message.get('hubCharacterConfigId') == 'global-user-persona' else '{{char}}'
+        if _text(message.get('text')):
+            examples.append(f'{speaker}: {_backyard_text(message.get("text"))}')
+    instructions = chat.get('modelInstructions') or {}
+    system_prompt = _text(instructions.get('customText')) if instructions.get('type') == 'custom' else ''
+    entries = [
+        {
+            'keys': [key.strip() for key in _text(item.get('key')).split(',') if key.strip()],
+            'content': _backyard_text(item.get('value')),
+            'enabled': True,
+            'insertion_order': index,
+        }
+        for index, item in enumerate(character.get('LorebookItems') or [])
+        if isinstance(item, dict) and _text(item.get('value'))
+    ]
+    card = _v2_card(
+        name=_text(character.get('name')) or _text(character.get('displayName')),
+        description=_backyard_text(character.get('persona')),
+        scenario=_backyard_text(chat.get('context')),
+        first_mes=greetings[0] if greetings else '',
+        alternate_greetings=greetings[1:],
+        mes_example='<START>\n' + '\n'.join(examples) if examples else '',
+        system_prompt=f'{{{{original}}}}\n\n{_backyard_text(system_prompt)}' if system_prompt else '',
+        creator_notes=_text(character.get('creatorNotes')) or _text(character.get('tagline')),
+        tags=[_text(t.get('name')) for t in character.get('Tags') or [] if isinstance(t, dict) and t.get('name')],
+        creator=_text((character.get('Author') or {}).get('username')),
+        extensions={'backyard_id': _text(character.get('id'))},
+    )
+    if entries:
+        card['data']['character_book'] = {'name': card['data']['name'], 'entries': entries}
+    return card
+
+
+async def _backyard_download(card_id: str) -> tuple[bytes, str]:
+    character = await _backyard_call(
+        'getHubCharacterConfigById', {'hubCharacterConfigId': card_id, 'includeStandaloneGroupConfig': True}
+    )
+    if not isinstance(character, dict) or character.get('notFound') or not character.get('id'):
+        raise SourceError('The Backyard hub has no public character with that id.')
+    if character.get('banned'):
+        raise SourceError('That character was removed from the Backyard hub.')
+    images = sorted(
+        (i for i in character.get('Images') or [] if isinstance(i, dict) and i.get('imageUrl')),
+        key=lambda i: i.get('order') or 0,
+    )
+    return await _card_file(backyard_card(character), _text(images[0]['imageUrl']) if images else '', BACKYARD_HOSTS)
+
+
+####################
+# Wyvern (app.wyvern.chat): public REST API
+####################
+
+WYVERN_API = 'https://api.wyvern.chat'
+WYVERN_HOSTS = ('api.wyvern.chat', 'imagedelivery.net')
+WYVERN_ID = re.compile(r'^_[A-Za-z0-9_-]{21}$')
+WYVERN_SORTS = {'popular': 'votes', 'newest': 'created_at', 'trending': 'popular'}
+
+
+def _wyvern_summary(character: dict) -> CardSummary | None:
+    card_id = _text(character.get('id'))
+    if not WYVERN_ID.match(card_id):
+        return None
+    tokens = character.get('token_count')
+    return CardSummary(
+        source='wyvern',
+        id=card_id,
+        name=_text(character.get('chat_name')) or _text(character.get('name')) or 'Unnamed',
+        tagline=(_text(character.get('tagline')) or _text(character.get('creator_notes')))[:300],
+        creator=_text((character.get('creator') or {}).get('displayName')),
+        tags=_strings(character.get('tags')),
+        image_url=_text(character.get('avatar')),
+        page_url=f'https://app.wyvern.chat/characters/{card_id}',
+        nsfw=_text(character.get('rating')) not in ('', 'none'),
+        has_lorebook=bool(character.get('lorebooks')),
+        tokens=tokens if isinstance(tokens, int) else None,
+    )
+
+
+async def _wyvern_search(query: str, page: int, sort: str, nsfw: bool, tags: TagFilter) -> SearchPage:
+    params = {
+        'q': query,
+        'page': page,
+        'limit': PAGE_SIZE,
+        'sort': 'relevance' if query and sort == 'popular' else WYVERN_SORTS[sort],
+        'order': 'DESC',
+    }
+    if tags.include:
+        params['tags'] = ','.join(tags.include)
+    if not nsfw:
+        params['rating'] = 'none'
+    data = await _get_json(f'{WYVERN_API}/exploreSearch/characters?{urlencode(params)}', WYVERN_HOSTS)
+    results = data.get('results') if isinstance(data, dict) else None
+    items = [item for c in results or [] if isinstance(c, dict) and (item := _wyvern_summary(c))]
+    return SearchPage(items=items, page=page, has_more=bool(isinstance(data, dict) and data.get('hasMore')))
+
+
+def wyvern_card(character: dict) -> dict:
+    """A V2 card from a Wyvern character; its lorebooks are merged into the card's book."""
+    entries = []
+    for book in character.get('lorebooks') or []:
+        # Newer books keep their entries in ``lexicon`` (same entry fields), older ones in ``entries``.
+        book = book if isinstance(book, dict) else {}
+        for entry in [*(book.get('entries') or []), *(book.get('lexicon') or [])]:
+            if isinstance(entry, dict) and _text(entry.get('content')):
+                entries.append({**entry, 'id': len(entries)})
+    note = _text(character.get('character_note'))
+    extensions = {'wyvern_id': _text(character.get('id'))}
+    if note:
+        extensions['depth_prompt'] = {'prompt': note, 'depth': 4, 'role': 'system'}
+    card = _v2_card(
+        name=_text(character.get('name')) or _text(character.get('chat_name')),
+        nickname=_text(character.get('chat_name')) or None,
+        description=_text(character.get('description')),
+        personality=_text(character.get('personality')),
+        scenario=_text(character.get('scenario')),
+        first_mes=_text(character.get('first_mes')),
+        alternate_greetings=_strings(character.get('alternate_greetings')),
+        mes_example=_text(character.get('mes_example')),
+        system_prompt=_text(character.get('pre_history_instructions')),
+        post_history_instructions=_text(character.get('post_history_instructions')),
+        creator_notes=_text(character.get('creator_notes')) or _text(character.get('tagline')),
+        tags=_strings(character.get('tags')),
+        creator=_text((character.get('creator') or {}).get('displayName')),
+        extensions=extensions,
+    )
+    if entries:
+        card['data']['character_book'] = {'name': card['data']['name'], 'entries': entries}
+    return card
+
+
+async def _wyvern_download(card_id: str) -> tuple[bytes, str]:
+    try:
+        character = await _get_json(f'{WYVERN_API}/characters/{card_id}', WYVERN_HOSTS)
+    except SourceError as error:
+        if '404' in str(error):
+            raise SourceError('Wyvern has no public character with that id.') from error
+        raise
+    if not isinstance(character, dict) or not character.get('id'):
+        raise SourceError('Wyvern returned no character.')
+    return await _card_file(wyvern_card(character), _text(character.get('avatar')), WYVERN_HOSTS)
+
+
+####################
+# JannyAI (jannyai.com): public JanitorAI characters as cards. The download is the endpoint
+# SillyTavern's importer uses. Search is best effort: the site's Meilisearch key is read from its own
+# pages, which its bot protection often hides from servers (less so from home connections).
+####################
+
+JANNY_HOSTS = ('jannyai.com',)
+JANNY_ID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+
+
+JANNY_SEARCH_HOST = 'search.jannyai.com'
+JANNY_UNAVAILABLE = (
+    'JannyAI search is not available from this server (its pages are behind bot protection, which '
+    'often blocks servers). Paste a JannyAI character link instead; importing by link may still work.'
+)
+JANNY_SCRIPT_RE = re.compile(r'<script[^>]+src=["\']([^"\']+\.js)["\']|["\'](/_(?:astro|next)/[^"\']+\.js)["\']')
+JANNY_KEY_RES = (
+    # apiKey: "...", api_key = '...', "Authorization": "Bearer ..."
+    re.compile(r'(?:apiKey|api_key|searchKey|key)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{24,128})["\']'),
+    re.compile(r'Bearer ([A-Za-z0-9_-]{24,128})'),
+)
+JANNY_INDEX_RES = (
+    re.compile(r'indexUid["\']?\s*[:=]\s*["\']([\w-]{2,64})["\']'),
+    re.compile(r'\.index\(\s*["\']([\w-]{2,64})["\']\s*\)'),
+    re.compile(r'/indexes/([\w-]{2,64})/search'),
+)
+JANNY_INDEX_GUESSES = ('janny-characters', 'characters', 'character')
+JANNY_CONFIG_TTL = 6 * 3600
+_janny_config: dict = {}  # {'key', 'index', 'at'} once found
+
+
+def find_janny_search_config(texts: list[str]) -> tuple[str | None, str | None]:
+    """The Meilisearch key and index name from the site's page and scripts, as far as they show them.
+
+    A key counts only from text that also names the search host, so other keys in the bundle are not
+    mistaken for it.
+    """
+    key = index = None
+    for text in texts:
+        # Look next to each mention of the search host first: the client is set up with both together.
+        for position in (m.start() for m in re.finditer(re.escape(JANNY_SEARCH_HOST), text)):
+            if key is not None:
+                break
+            window = text[max(0, position - 400) : position + 400]
+            for pattern in JANNY_KEY_RES:
+                match = pattern.search(window)
+                if match:
+                    key = match.group(1)
+                    break
+        if index is None:
+            for pattern in JANNY_INDEX_RES:
+                match = pattern.search(text)
+                if match:
+                    index = match.group(1)
+                    break
+    return key, index
+
+
+def janny_script_urls(page: str) -> list[str]:
+    """The page's own script files, in order."""
+    urls: list[str] = []
+    for match in JANNY_SCRIPT_RE.finditer(page):
+        src = match.group(1) or match.group(2)
+        url = src if src.startswith('https://') else f'https://jannyai.com{src}' if src.startswith('/') else ''
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+async def _janny_text(url: str) -> str:
+    body, _ = await _get(url, JANNY_HOSTS, 4 * 1024 * 1024)
+    return body.decode('utf-8', 'replace')
+
+
+async def _janny_meili(path: str, key: str, payload: dict | None = None) -> tuple[int, object]:
+    session = await get_session()
+    headers = {**HEADERS, 'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
+    url = f'https://{JANNY_SEARCH_HOST}{path}'
+    try:
+        request = (
+            session.post(url, json=payload, headers=headers, timeout=TIMEOUT, allow_redirects=False)
+            if (payload is not None)
+            else session.get(url, headers=headers, timeout=TIMEOUT, allow_redirects=False)
+        )
+        async with request as response:
+            body = await _read_capped(response, SEARCH_MAX_BYTES)
+            try:
+                return response.status, json.loads(body)
+            except json.JSONDecodeError:
+                return response.status, None
+    except aiohttp.ClientError as error:
+        raise SourceError(f'Could not reach JannyAI search: {error}') from error
+    except TimeoutError as error:
+        raise SourceError('JannyAI search did not answer in time.') from error
+
+
+async def _janny_search_config() -> tuple[str, str]:
+    """Find (and cache) the site's public search key and index, as its own pages use them."""
+    if _janny_config.get('key') and time.monotonic() - _janny_config.get('at', 0) < JANNY_CONFIG_TTL:
+        return _janny_config['key'], _janny_config['index']
+    try:
+        page = await _janny_text('https://jannyai.com/characters/search')
+    except SourceError as error:
+        log.info('JannyAI search page unavailable: %s', error)
+        raise SourceError(JANNY_UNAVAILABLE) from error
+    texts = [page]
+    key, index = find_janny_search_config(texts)
+    scripts = janny_script_urls(page)
+    for url in scripts[:40]:
+        if key and index:
+            break
+        try:
+            text = await _janny_text(url)
+        except SourceError:
+            continue
+        found_key, found_index = find_janny_search_config([text])
+        key, index = key or found_key, index or found_index
+    if not key:
+        log.info('JannyAI search key not found in %d scripts', len(scripts))
+        raise SourceError(JANNY_UNAVAILABLE)
+    candidates = [index] if index else []
+    candidates += [guess for guess in JANNY_INDEX_GUESSES if guess not in candidates]
+    for candidate in candidates:
+        status, _ = await _janny_meili('/multi-search', key, {'queries': [{'indexUid': candidate, 'limit': 1}]})
+        if status == 200:
+            _janny_config.update(key=key, index=candidate, at=time.monotonic())
+            return key, candidate
+    log.info('JannyAI search index not found (tried %s)', candidates)
+    raise SourceError(JANNY_UNAVAILABLE)
+
+
+def _first(hit: dict, *names: str):
+    for name in names:
+        value = hit.get(name)
+        if value not in (None, '', []):
+            return value
+    return None
+
+
+def _janny_slug(name: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')[:80] or 'character'
+
+
+def _janny_summary(hit: dict) -> CardSummary | None:
+    card_id = _text(_first(hit, 'id', 'characterId', 'uuid')).lower()
+    if not JANNY_ID.match(card_id):
+        return None
+    name = _text(_first(hit, 'name', 'displayName', 'characterName')) or 'Unnamed'
+    avatar = _text(_first(hit, 'avatar', 'avatarUrl', 'avatar_url', 'image', 'imageUrl'))
+    if avatar and not avatar.startswith('https://'):
+        avatar = f'https://image.jannyai.com/bot-avatars/{avatar.lstrip("/")}'
+    raw_tags = _first(hit, 'tags', 'tagNames', 'tag_names') or []
+    tags = [
+        _text(tag.get('name')) if isinstance(tag, dict) else _text(tag)
+        for tag in (raw_tags if isinstance(raw_tags, list) else [])
+    ]
+    tokens = _first(hit, 'totalToken', 'totalTokens', 'tokenCount', 'tokens')
+    tagline = re.sub(r'<[^>]+>', ' ', _text(_first(hit, 'tagline', 'description', 'summary')))
+    return CardSummary(
+        source='janny',
+        id=card_id,
+        name=name,
+        tagline=re.sub(r'\s+', ' ', tagline).strip()[:300],
+        creator=_text(_first(hit, 'creatorName', 'creator', 'authorName', 'username')),
+        tags=[tag for tag in tags if isinstance(tag, str) and tag and not tag.isdigit()],
+        image_url=avatar,
+        page_url=f'https://jannyai.com/characters/{card_id}_character-{_janny_slug(name)}',
+        nsfw=bool(_first(hit, 'isNsfw', 'is_nsfw', 'nsfw')),
+        tokens=tokens if isinstance(tokens, int) else None,
+    )
+
+
+async def _janny_search(query: str, page: int, sort: str, nsfw: bool, tags: TagFilter) -> SearchPage:
+    """Best effort: the site's own Meilisearch search, with its public key read from its pages.
+
+    The index layout is not published, so results are read leniently and filtered here (adult cards,
+    tags) rather than with server-side filters that might name fields the index does not have.
+    """
+    key, index = await _janny_search_config()
+    status, data = await _janny_meili(
+        '/multi-search',
+        key,
+        {'queries': [{'indexUid': index, 'q': query, 'limit': PAGE_SIZE * 2, 'offset': (page - 1) * PAGE_SIZE * 2}]},
+    )
+    if status in (401, 403):
+        _janny_config.clear()  # the key changed; find it again next time
+        raise SourceError('JannyAI search refused the request. Try again in a moment.')
+    if status != 200 or not isinstance(data, dict):
+        raise SourceError(f'JannyAI search answered {status}.')
+    result = (data.get('results') or [{}])[0] if isinstance(data.get('results'), list) else {}
+    hits = result.get('hits') if isinstance(result, dict) else None
+    items = [item for hit in hits or [] if isinstance(hit, dict) and (item := _janny_summary(hit))]
+    if not nsfw:
+        items = [item for item in items if not item.nsfw]
+    total = result.get('estimatedTotalHits') or result.get('totalHits') or 0
+    has_more = len(hits or []) == PAGE_SIZE * 2 or (isinstance(total, int) and page * PAGE_SIZE * 2 < total)
+    return SearchPage(items=items[: PAGE_SIZE * 2], page=page, has_more=has_more)
+
+
+async def _janny_download(card_id: str) -> tuple[bytes, str]:
+    session = await get_session()
+    try:
+        async with session.post(
+            'https://api.jannyai.com/api/v1/download',
+            json={'characterId': card_id},
+            headers={**HEADERS, 'Content-Type': 'application/json'},
+            timeout=TIMEOUT,
+            allow_redirects=False,
+        ) as response:
+            detail = (await _read_capped(response, 64 * 1024)).decode('utf-8', 'replace')
+            if response.status >= 400:
+                if 'cloudflare' in detail.lower() or 'just a moment' in detail.lower():
+                    raise SourceError(
+                        'JannyAI’s bot protection blocked this server. It usually lets home connections '
+                        'through but blocks cloud hosts; you can also download the card on jannyai.com '
+                        'and use Import Character Cards.'
+                    )
+                raise SourceError(f'JannyAI answered {response.status}.')
+    except aiohttp.ClientError as error:
+        raise SourceError(f'Could not reach JannyAI: {error}') from error
+    except TimeoutError as error:
+        raise SourceError('JannyAI did not answer in time.') from error
+    try:
+        url = json.loads(detail).get('downloadUrl') or ''
+    except (json.JSONDecodeError, AttributeError) as error:
+        raise SourceError('JannyAI returned something unexpected.') from error
+    if not url:
+        raise SourceError('JannyAI has no card for that character.')
+    # The card file is on JannyAI's own storage; any https host it names is accepted for this one file.
+    host = (urlparse(url).hostname or '').lower()
+    if urlparse(url).scheme != 'https' or not host:
+        raise SourceError('JannyAI returned an unusable download link.')
+    data, _ = await _get(url, (host,), CHARACTER_CARD_MAX_BYTES)
+    return data, 'card.png' if data.startswith(PNG_SIGNATURE) else 'card.json'
 
 
 ####################
@@ -688,6 +1273,26 @@ SOURCES: dict[str, Source] = {
             tags_in_results=False,  # only content warnings come back; the site filters by tag itself
         ),
         Source('poe', 'Poe', 'https://poe.com', POE_ID, _poe_search, _poe_download, False, supports_tags=False),
+        Source('pygmalion', 'Pygmalion', 'https://pygmalion.chat', PYG_ID, _pyg_search, _pyg_download, False),
+        Source(
+            'backyard',
+            'Backyard AI',
+            'https://backyard.ai/hub',
+            BACKYARD_ID,
+            _backyard_search,
+            _backyard_download,
+            False,
+        ),
+        Source('wyvern', 'Wyvern', 'https://app.wyvern.chat', WYVERN_ID, _wyvern_search, _wyvern_download, False),
+        Source(
+            'janny',
+            'JannyAI',
+            'https://jannyai.com',
+            JANNY_ID,
+            _janny_search,
+            _janny_download,
+            True,
+        ),
     )
 }
 
@@ -771,4 +1376,14 @@ def parse_card_link(url: str) -> tuple[str, str] | None:
     if host == 'character-tavern.com' and len(parts) >= 3 and parts[0] == 'character':
         card_id = '/'.join(parts[1:3])
         return ('tavern', card_id) if TAVERN_ID.match(card_id) else None
+    if host == 'pygmalion.chat' and len(parts) >= 2 and parts[0] == 'character':
+        return ('pygmalion', parts[1].lower()) if PYG_ID.match(parts[1].lower()) else None
+    if host == 'backyard.ai' and len(parts) >= 3 and parts[:2] == ['hub', 'character']:
+        return ('backyard', parts[2]) if BACKYARD_ID.match(parts[2]) else None
+    if host == 'app.wyvern.chat' and 'characters' in parts[:-1] and WYVERN_ID.match(parts[-1]):
+        # /characters/{id}, or a creator's /profiles/{name}/characters/{id}
+        return ('wyvern', parts[-1])
+    if host == 'jannyai.com' and len(parts) >= 2 and parts[0] == 'characters':
+        card_id = parts[1].split('_', 1)[0].lower()
+        return ('janny', card_id) if JANNY_ID.match(card_id) else None
     return None

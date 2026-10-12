@@ -1,6 +1,7 @@
 import base64
 import json
 from collections import OrderedDict
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -453,3 +454,229 @@ async def test_tag_filters(fake_get):
     page = await search_cards('chub', '', 1, tags=['fantasy'], exclude_tags=['NSFL'])
     assert 'tags=fantasy&exclude_tags=NSFL' in calls[-1]
     assert [item.name for item in page.items] == ['X']
+
+
+PYG_ID = '72f651d3-68eb-484f-8ef4-24d592eb6964'
+
+
+async def test_pygmalion_search_and_download(fake_get):
+    calls, responses = fake_get
+    assert parse_card_link(f'https://pygmalion.chat/character/{PYG_ID}') == ('pygmalion', PYG_ID)
+    api = 'https://server.pygmalion.chat/galatea.v1.PublicCharacterService'
+    responses[f'{api}/CharacterSearch'] = json.dumps(
+        {
+            'totalItems': '30',
+            'characters': [
+                {
+                    'id': PYG_ID,
+                    'displayName': 'Amber',
+                    'description': 'A cheerful baker.',
+                    'avatarUrl': 'https://assets.pygmalion.chat/abc',
+                    'tags': ['Female', 'Fantasy'],
+                    'owner': {'displayName': 'Maker'},
+                    'downloads': '12',
+                    'personalityTokenCount': '900',
+                },
+                {'id': 'not-a-uuid', 'displayName': 'Bad'},
+            ],
+        }
+    ).encode()
+    page = await search_cards('pygmalion', 'baker', 1, 'newest', False, ['fantasy'], ['Anime'])
+    assert [item.name for item in page.items] == ['Amber'] and page.has_more is True
+    assert page.items[0].tokens == 900 and page.items[0].creator == 'Maker'
+    message = json.loads(parse_qs(urlparse(calls[-1]).query)['message'][0])
+    assert message['orderBy'] == 'approved_at' and message['page'] == 0
+    assert message['tagsNamesInclude'] == ['fantasy'] and message['tagsNamesExclude'] == ['Anime']
+
+    responses[f'{api}/Character'] = json.dumps(
+        {
+            'character': {
+                'id': PYG_ID,
+                'displayName': 'Amber',
+                'description': 'A cheerful baker.',
+                'avatarUrl': 'https://assets.pygmalion.chat/abc',
+                'tags': ['Female'],
+                'personality': {
+                    'persona': '{{char}} bakes bread.',
+                    'greeting': 'Fresh loaves!',
+                    'alternateGreetings': ['Back again?'],
+                    'mesExample': '<START>\n{{char}}: Try this.',
+                    'characterNotes': 'Stay cheerful.',
+                },
+            }
+        }
+    ).encode()
+    responses['https://assets.pygmalion.chat/abc'] = TINY_PNG
+    data, filename = await download_card('pygmalion', PYG_ID)
+    character = parse_card_bytes(data, filename).character
+    assert filename == 'card.png' and character.name == 'Amber'
+    assert character.description == '{{char}} bakes bread.' and character.first_mes == 'Fresh loaves!'
+    assert character.alternate_greetings == ['Back again?'] and character.creator_notes == 'A cheerful baker.'
+    assert character.extensions['depth_prompt']['prompt'] == 'Stay cheerful.'
+
+
+BACKYARD_ID = 'cmkqhbn9imrhhkb1w2yn3a1ol'
+
+
+async def test_backyard_search_and_download(fake_get):
+    calls, responses = fake_get
+    assert parse_card_link(f'https://backyard.ai/hub/character/{BACKYARD_ID}') == ('backyard', BACKYARD_ID)
+    char = f'{{_cfg&:{BACKYARD_ID}:cfg&_}}'
+    responses['https://backyard.ai/api/trpc/hub.browse.getHubGroupConfigsBySearch'] = json.dumps(
+        {
+            'result': {
+                'data': {
+                    'json': {
+                        'hubGroupConfigs': [
+                            {
+                                'id': 'cgroupgroupgroupgroupgrou',
+                                'name': 'Bloonarius',
+                                'tagline': 'Powerful Ruler',
+                                'Tags': [{'name': 'fantasy'}],
+                                'Author': {'username': 'maker'},
+                                'CharacterConfigs': [
+                                    {
+                                        'id': BACKYARD_ID,
+                                        'Images': [{'imageUrl': 'https://media.backyard.ai/public/x.webp/public'}],
+                                    }
+                                ],
+                            }
+                        ],
+                        'nextCursor': 50,
+                    }
+                }
+            }
+        }
+    ).encode()
+    page = await search_cards('backyard', 'bloon', 2, 'popular', False)
+    assert page.items[0].id == BACKYARD_ID and page.items[0].page_url.endswith(BACKYARD_ID) and page.has_more
+    sent = json.loads(parse_qs(urlparse(calls[-1]).query)['input'][0])['json']
+    assert sent == {'query': 'bloon', 'cursor': 50, 'sortBy': {'type': 'Relevance', 'direction': 'desc'}}
+
+    responses['https://backyard.ai/api/trpc/hub.browse.getHubCharacterConfigById'] = json.dumps(
+        {
+            'result': {
+                'data': {
+                    'json': {
+                        'id': BACKYARD_ID,
+                        'name': 'Bloonarius',
+                        'persona': f'{char} is an airship. {{user}} is small.',
+                        'Tags': [{'name': 'fantasy'}],
+                        'Author': {'username': 'maker'},
+                        'LorebookItems': [{'key': 'Bloon, blimp', 'value': f'{char} is a Bloon.'}],
+                        'Images': [{'imageUrl': 'https://media.backyard.ai/public/x.webp/public', 'order': 0}],
+                        'standaloneGroupConfig': {
+                            'PrimaryChat': {
+                                'context': 'A deep cavern.',
+                                'modelInstructions': {'type': 'custom', 'customText': 'Be dramatic.'},
+                                'HubGreetingMessages': [
+                                    {'text': 'Second', 'position': 'b'},
+                                    {'text': f'{char} looms.', 'position': 'a'},
+                                ],
+                                'HubExampleMessages': [
+                                    {'hubCharacterConfigId': 'global-user-persona', 'text': 'Hi', 'position': 'a'},
+                                    {'hubCharacterConfigId': BACKYARD_ID, 'text': 'Hello, {user}.', 'position': 'b'},
+                                ],
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    ).encode()
+    responses['https://media.backyard.ai/public/x.webp/public'] = TINY_PNG
+    data, filename = await download_card('backyard', BACKYARD_ID)
+    character = parse_card_bytes(data, filename).character
+    assert character.description == '{{char}} is an airship. {{user}} is small.'
+    assert character.first_mes == '{{char}} looms.' and character.alternate_greetings == ['Second']
+    assert character.scenario == 'A deep cavern.'
+    assert character.mes_example == '<START>\n{{user}}: Hi\n{{char}}: Hello, {{user}}.'
+    assert character.system_prompt == '{{original}}\n\nBe dramatic.'
+    assert character.character_book['entries'][0]['keys'] == ['Bloon', 'blimp']
+
+    responses['https://backyard.ai/api/trpc/hub.browse.getHubCharacterConfigById'] = json.dumps(
+        {'result': {'data': {'json': {'notFound': True}}}}
+    ).encode()
+    with pytest.raises(SourceError, match='no public character'):
+        await download_card('backyard', 'cmkqhbn9imrhhkb1w2yn3a1oz')
+
+
+WYVERN_ID = '_d7e8wpEPXgmWEwLpjbEBY'
+
+
+async def test_wyvern_search_and_download(fake_get):
+    calls, responses = fake_get
+    assert parse_card_link(f'https://app.wyvern.chat/characters/{WYVERN_ID}') == ('wyvern', WYVERN_ID)
+    assert parse_card_link(f'https://app.wyvern.chat/profiles/maker/characters/{WYVERN_ID}') == ('wyvern', WYVERN_ID)
+    character = {
+        'id': WYVERN_ID,
+        'name': 'He Yanzhi',
+        'chat_name': 'Yanzhi',
+        'description': 'A ghost cultivator.',
+        'first_mes': 'The lanterns flicker.',
+        'alternate_greetings': ['Again?'],
+        'pre_history_instructions': 'Stay in the ghost city.',
+        'character_note': 'Speak softly.',
+        'tags': ['Male', 'Fantasy'],
+        'rating': 'none',
+        'avatar': 'https://imagedelivery.net/abc/def/public',
+        'creator': {'displayName': 'Maker'},
+        'lorebooks': [{'entries': [], 'lexicon': [{'keys': ['Wuyou'], 'content': 'The Ghost King.', 'entry_id': 'x'}]}],
+    }
+    responses['https://api.wyvern.chat/exploreSearch/characters'] = json.dumps(
+        {'results': [character, {**character, 'id': 'bad', 'name': 'Bad'}], 'hasMore': False}
+    ).encode()
+    page = await search_cards('wyvern', '', 1, 'trending', False, ['Fantasy'], ['Male'])
+    assert page.items == []  # every result had the excluded tag
+    query = parse_qs(urlparse(calls[-1]).query)
+    assert query['sort'] == ['popular'] and query['tags'] == ['Fantasy'] and query['rating'] == ['none']
+    page = await search_cards('wyvern', 'ghost', 1, 'popular', False)
+    assert [item.name for item in page.items] == ['Yanzhi']
+    assert parse_qs(urlparse(calls[-1]).query)['sort'] == ['relevance']
+
+    responses[f'https://api.wyvern.chat/characters/{WYVERN_ID}'] = json.dumps(character).encode()
+    responses['https://imagedelivery.net/abc/def/public'] = TINY_PNG
+    data, filename = await download_card('wyvern', WYVERN_ID)
+    imported = parse_card_bytes(data, filename).character
+    assert imported.name == 'He Yanzhi' and imported.nickname == 'Yanzhi'
+    assert imported.system_prompt == 'Stay in the ghost city.'
+    assert imported.extensions['depth_prompt']['prompt'] == 'Speak softly.'
+    assert imported.character_book['entries'][0]['keys'] == ['Wuyou']
+
+
+JANNY_ID = '1b2c3d4e-0000-4000-8000-1234567890ab'
+
+
+def test_janny_links_and_search_config():
+    assert parse_card_link(f'https://jannyai.com/characters/{JANNY_ID}_character-sera') == ('janny', JANNY_ID)
+    assert parse_card_link('https://jannyai.com/characters/search') is None
+    page = '<script type="module" src="/_astro/page.abc.js"></script><link href="/x.css"><script src="https://other.example/a.js">'
+    assert sources.janny_script_urls(page) == ['https://jannyai.com/_astro/page.abc.js', 'https://other.example/a.js']
+    filler = 'x' * 1000
+    bundle = (
+        f'const unrelated={{apiKey:"pk_live_notthesearchkeyatall_123456"}};{filler}'
+        'new MeiliSearch({host:"https://search.jannyai.com",apiKey:"0123456789abcdef0123456789abcdef"});'
+        'client.index("janny-characters").search(q)'
+    )
+    key, index = sources.find_janny_search_config(['no search host here apiKey:"aaaaaaaaaaaaaaaaaaaaaaaaaaaa"', bundle])
+    assert (key, index) == ('0123456789abcdef0123456789abcdef', 'janny-characters')
+    assert sources.find_janny_search_config(['nothing']) == (None, None)
+
+
+def test_janny_hits_are_read_leniently():
+    item = sources._janny_summary(
+        {
+            'id': JANNY_ID.upper(),
+            'name': 'Sera the Elf',
+            'description': '<p>A <b>forest</b> guardian.</p>',
+            'avatar': 'abc.webp',
+            'tags': [{'name': 'Fantasy'}, 12, 'Female'],
+            'isNsfw': True,
+            'totalToken': 1200,
+        }
+    )
+    assert item.id == JANNY_ID and item.tagline == 'A forest guardian.'
+    assert item.image_url == 'https://image.jannyai.com/bot-avatars/abc.webp'
+    assert item.tags == ['Fantasy', 'Female'] and item.nsfw and item.tokens == 1200
+    assert item.page_url == f'https://jannyai.com/characters/{JANNY_ID}_character-sera-the-elf'
+    assert sources._janny_summary({'id': 'nope'}) is None

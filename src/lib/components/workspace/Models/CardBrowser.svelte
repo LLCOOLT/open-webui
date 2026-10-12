@@ -342,7 +342,7 @@
 			</div>
 			<div class="text-[0.6875rem] text-gray-400 mt-1">
 				{$i18n.t(
-					'A character page on Chub, RisuRealm or Character Tavern, or a Poe bot (poe.com/BotName).'
+					'A character page on Chub, RisuRealm, Character Tavern, Pygmalion, Wyvern, Backyard AI or JannyAI, or a Poe bot (poe.com/BotName).'
 				)}
 			</div>
 		</form>
