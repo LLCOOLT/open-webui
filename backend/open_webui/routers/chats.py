@@ -54,7 +54,9 @@ from open_webui.utils.models import get_all_models
 from open_webui.utils.roleplay.assist import (
     clean_image_prompt,
     clean_impersonation,
+    clean_opening,
     impersonate_prompt,
+    opening_prompt,
     lore_prompt,
     message_text,
     parse_lore_suggestions,
@@ -1686,6 +1688,38 @@ async def impersonate_user(
     if not text:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='The model returned an empty message.')
     return {'content': text}
+
+
+@router.post('/roleplay/opening')
+async def write_opening(
+    request: Request,
+    form_data: RoleplayAssistForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """The character's first message for a new chat, picking up from what it remembers about the
+    user (character memory across chats); the card's greetings show its voice."""
+    from open_webui.models.character_memories import CharacterMemories
+    from open_webui.utils.roleplay.prompt import greetings as character_greetings
+    from open_webui.utils.roleplay.recall import recall_available
+
+    model, character, ctx = await _roleplay_context(request, form_data, user, db)
+    memory = (
+        await CharacterMemories.get_entries(user.id, model.id, db=db)
+        if character.recall_enabled and await recall_available()
+        else []
+    )
+    prompt = opening_prompt(character, ctx, memory, character_greetings(character, ctx))
+    skip_character_system_prompt(request, model.id)
+    try:
+        reply = await run_task_prompt(request, user, model.id, prompt, 'character_opening', direct=True)
+    except Exception as error:
+        log.info('Opening failed for %s: %s', model.id, error)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='The model did not answer.') from error
+    text = clean_opening(reply, ctx)
+    if not text:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='The model returned an empty message.')
+    return {'content': text, 'remembered': len(memory)}
 
 
 async def _require_image_generation(user, db) -> None:

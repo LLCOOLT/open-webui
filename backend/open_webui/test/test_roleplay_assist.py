@@ -446,3 +446,43 @@ async def test_lore_suggestion_endpoint(api, character_id, people, monkeypatch):
     assert response.json()['source'] == 'memory'
     assert '<story_memory>\nThey met Bram.\n</story_memory>' in prompts[1]
     await Lorebooks.delete_lorebook_by_id(lorebook.id)
+
+
+def test_opening_prompt():
+    from open_webui.utils.roleplay.assist import clean_opening, opening_prompt
+
+    character = CharacterMeta(name='Sera', description='{{char}} runs the inn.')
+    memory = [{'content': 'Robin promised to bring Sera a map.'}]
+    prompt = opening_prompt(character, CTX, memory, ['*Sera waves.* "Welcome back."'])
+    assert 'Robin promised to bring Sera a map.' in prompt and 'pick up naturally' in prompt
+    assert '*Sera waves.* "Welcome back."' in prompt and '{{' not in prompt
+    fresh = opening_prompt(character, CTX, [], [])
+    assert 'have not talked before' in fresh and 'example_openings' not in fresh
+    assert clean_opening('<think>x</think>Sera: "You came back!"\nRobin: hi', CTX) == '"You came back!"'
+
+
+async def test_opening_endpoint(api, character_id, people, monkeypatch):
+    from open_webui.models.character_memories import CharacterMemories
+
+    await Config.upsert({'characters.recall.enable': True})
+    await CharacterMemories.set_entries(people['admin'].id, character_id, ['Admin fixed the inn roof.'])
+    calls = []
+
+    async def fake_task(request, user, model_id, prompt, task, direct=False):
+        calls.append({'prompt': prompt, 'direct': direct, 'task': task})
+        return 'Seraphina: *She grins.* "The roof held all winter, thanks to you."'
+
+    monkeypatch.setattr(chats_router, 'run_task_prompt', fake_task)
+    response = await api.post('/api/v1/chats/roleplay/opening', json={'model_id': character_id})
+    assert response.status_code == 200, response.text
+    assert response.json() == {'content': '*She grins.* "The roof held all winter, thanks to you."', 'remembered': 1}
+    assert calls[0]['direct'] is True and calls[0]['task'] == 'character_opening'
+    assert 'Admin fixed the inn roof.' in calls[0]['prompt']
+    assert 'Welcome, Admin.' in calls[0]['prompt']  # the card's greeting, as a style example
+
+    # Recall off for the server: no memory is used.
+    await Config.upsert({'characters.recall.enable': False})
+    await api.post('/api/v1/chats/roleplay/opening', json={'model_id': character_id})
+    assert 'Admin fixed the inn roof.' not in calls[1]['prompt']
+    await Config.upsert({'characters.recall.enable': True})
+    await CharacterMemories.delete_memory(people['admin'].id, character_id)

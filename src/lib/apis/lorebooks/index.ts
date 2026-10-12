@@ -279,3 +279,15 @@ export const suggestLoreEntries = async (
 			method: 'POST'
 		})
 	).json();
+
+// The character's first message for a new chat, picking up from what it remembers about the user.
+export const writeCharacterOpening = async (
+	token: string,
+	form: RoleplayAssistForm
+): Promise<{ content: string; remembered: number }> =>
+	(
+		await request('/chats/roleplay/opening', token, {
+			method: 'POST',
+			body: JSON.stringify(form)
+		})
+	).json();

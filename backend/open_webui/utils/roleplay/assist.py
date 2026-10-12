@@ -104,7 +104,8 @@ def impersonate_prompt(character: CharacterMeta, ctx: MacroContext, messages: li
         '{{SCENARIO}}': f'\n<scenario>\n{scenario}\n</scenario>\n' if scenario else '',
         '{{TRANSCRIPT}}': transcript(messages, ctx.char, ctx.user) or '(The chat has not started yet.)',
         '{{DRAFT}}': (
-            f"\n- Build the message from this idea of {{{{user}}}}'s, keeping its intent:\n<idea>\n{draft[:FIELD_CHARS]}\n</idea>"
+            "\n- Build the message from this idea of {{user}}'s, keeping its intent:"
+            f'\n<idea>\n{draft[:FIELD_CHARS]}\n</idea>'
             if draft
             else ''
         ),
@@ -155,7 +156,8 @@ SPRITE_EDIT_PROMPT = (
     '{{EXPRESSION}} expression. Keep the framing and a plain background.'
 )
 
-SPRITE_PROMPT = """Write a prompt for an image generator: a portrait of {{char}} showing a clear {{EXPRESSION}} expression.
+SPRITE_PROMPT = """Write a prompt for an image generator: a portrait of {{char}}
+showing a clear {{EXPRESSION}} expression.
 
 <{{char}}>
 {{CHAR_DESCRIPTION}}
@@ -279,3 +281,59 @@ def parse_lore_suggestions(reply: str, existing: list[dict], ctx: MacroContext) 
         if len(suggestions) >= MAX_SUGGESTIONS:
             break
     return suggestions
+
+
+####################
+# Opening from memory
+####################
+
+OPENING_PROMPT = """Write {{char}}'s first message for a new conversation with {{user}}.
+
+<{{char}}>
+{{CHAR_DESCRIPTION}}
+</{{char}}>
+
+<{{user}}>
+{{PERSONA}}
+</{{user}}>
+{{SCENARIO}}
+<memory>
+{{MEMORY}}
+</memory>
+{{EXAMPLES}}
+- {{memory_rule}}
+- Write only as {{char}}: their words, actions and thoughts. Never write what {{user}} says or does.
+- Match {{char}}'s voice and the formatting of the example openings (for example *actions* and "speech").
+- One message, about as long as the example openings, with no name prefix and no notes."""
+
+MEMORY_RULE = (
+    '{{char}} remembers {{user}}: pick up naturally from what {{char}} remembers, as when two people '
+    'meet again (a callback to something shared, how things stand between them now). Do not list '
+    'the memories or retell them.'
+)
+NO_MEMORY_RULE = '{{char}} and {{user}} have not talked before; open a fresh scene that invites {{user}} in.'
+
+
+def opening_prompt(character: CharacterMeta, ctx: MacroContext, memory: list[dict], examples: list[str]) -> str:
+    scenario = _field(character, ctx, 'scenario')
+    lines = '\n'.join(f'- {entry["content"]}' for entry in memory if entry.get('content'))
+    shown = [text[:1_500] for text in examples[:3]]
+    replacements = {
+        '{{CHAR_DESCRIPTION}}': character_brief(character, ctx),
+        '{{PERSONA}}': ctx.persona.strip()[:FIELD_CHARS] or f'{ctx.user}, the user.',
+        '{{SCENARIO}}': f'\n<scenario>\n{scenario}\n</scenario>\n' if scenario else '',
+        '{{MEMORY}}': lines or '(nothing: this is their first conversation)',
+        '{{EXAMPLES}}': (
+            '\n<example_openings>\n' + '\n\n---\n\n'.join(shown) + '\n</example_openings>\n' if shown else ''
+        ),
+        '{{memory_rule}}': MEMORY_RULE if lines else NO_MEMORY_RULE,
+    }
+    prompt = OPENING_PROMPT
+    for key, value in replacements.items():
+        prompt = prompt.replace(key, value)
+    return prompt.replace('{{char}}', ctx.char or 'the character').replace('{{user}}', ctx.user or 'the user')
+
+
+def clean_opening(reply: str, ctx: MacroContext) -> str:
+    """The message text: no reasoning, no ``{{char}}:`` prefix, nothing written as ``{{user}}``."""
+    return cut_user_lines(THINK_RE.sub('', reply or '').strip(), ctx.char, ctx.user).strip()

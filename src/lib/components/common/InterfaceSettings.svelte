@@ -76,6 +76,8 @@
 	let expressiveSpeech = true;
 	let characterExpressions = true;
 	let characterPortrait = true;
+	// New character chats open blank (greetings offered to pick) unless this is on.
+	let characterCardGreeting = false;
 	let collapseCodeBlocks = false;
 	let renderMarkdownInUserMessages = true;
 	let renderMarkdownInAssistantMessages = true;
@@ -340,6 +342,7 @@
 		expressiveSpeech = currentSettings?.expressiveSpeech ?? true;
 		characterExpressions = currentSettings?.characterExpressions ?? true;
 		characterPortrait = currentSettings?.characterPortrait ?? true;
+		characterCardGreeting = currentSettings?.characterCardGreeting ?? false;
 
 		richTextInput = currentSettings?.richTextInput ?? true;
 		showFormattingToolbar = currentSettings?.showFormattingToolbar ?? false;
@@ -1083,6 +1086,30 @@
 				</p>
 			</div>
 		{/if}
+
+		<div>
+			<div class={settingRowClass}>
+				<div id="character-card-greeting-label" class={settingLabelClass}>
+					{$i18n.t("Open new chats with the card's greeting")}
+				</div>
+				<div class={settingControlClass}>
+					<Switch
+						ariaLabelledbyId="character-card-greeting-label"
+						tooltip={true}
+						bind:state={characterCardGreeting}
+						inherited={isDefaultSetting('characterCardGreeting')}
+						on:change={() => {
+							saveSettings({ characterCardGreeting });
+						}}
+					/>
+				</div>
+			</div>
+			<p class={settingDescriptionClass}>
+				{$i18n.t(
+					'When off, a new chat with a character starts empty, so it can carry on from what the character remembers; its greetings are offered to pick from instead.'
+				)}
+			</p>
+		</div>
 	{/if}
 
 	<div>

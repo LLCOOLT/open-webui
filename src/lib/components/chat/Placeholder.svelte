@@ -28,6 +28,7 @@
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 
 	import Suggestions from './Suggestions.svelte';
+	import GreetingPicker from './GreetingPicker.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import EyeSlash from '$lib/components/icons/EyeSlash.svelte';
 	import MessageInput from './MessageInput.svelte';
@@ -85,6 +86,12 @@
 	};
 
 	export let dragged = false;
+
+	// Character chats that start empty: the greetings to pick from (see Chat.svelte).
+	export let greetingChoices: { name: string; greetings: string[] } | null = null;
+	export let openingBusy = false;
+	export let onPickGreeting: (index: number) => void = () => {};
+	export let onOpening: () => void = () => {};
 
 	let models = [];
 	export let selectedModelIdx = 0;
@@ -305,7 +312,21 @@
 	{:else}
 		<div class="mx-auto max-w-2xl mt-2" in:fade={{ duration: 200, delay: 200 }}>
 			<div class="mx-5">
-				<Suggestions suggestionPrompts={selectedSuggestionPrompts} inputValue={prompt} {onSelect} />
+				{#if greetingChoices}
+					<GreetingPicker
+						name={greetingChoices.name}
+						greetings={greetingChoices.greetings}
+						busy={openingBusy}
+						onPick={onPickGreeting}
+						{onOpening}
+					/>
+				{:else}
+					<Suggestions
+						suggestionPrompts={selectedSuggestionPrompts}
+						inputValue={prompt}
+						{onSelect}
+					/>
+				{/if}
 			</div>
 		</div>
 	{/if}

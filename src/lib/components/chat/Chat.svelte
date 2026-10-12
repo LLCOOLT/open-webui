@@ -119,7 +119,7 @@
 		classifyCharacterExpression,
 		getCharacterGreetings
 	} from '$lib/apis/models';
-	import { refreshChatRecall } from '$lib/apis/lorebooks';
+	import { refreshChatRecall, writeCharacterOpening } from '$lib/apis/lorebooks';
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
@@ -829,8 +829,17 @@
 	const hasOnlyGreetings = () =>
 		Object.values(history?.messages ?? {}).every((message: any) => message?.greeting);
 
+	// New chats open empty unless the user wants the card's greeting (settings: "Open new chats
+	// with the card's greeting"): an empty chat carries on from what the character remembers, and
+	// the greetings are offered to pick from (Placeholder > GreetingPicker).
+	let greetingChoices: { modelId: string; name: string; greetings: string[] } | null = null;
+	let openingBusy = false;
+
 	const seedCharacterGreetings = async (..._triggers: unknown[]) => {
-		if ($chatId || isShared || !hasOnlyGreetings()) return;
+		if ($chatId || isShared || !hasOnlyGreetings()) {
+			greetingChoices = null;
+			return;
+		}
 
 		const model: any =
 			selectedModels.length === 1 ? $models.find((m) => m.id === selectedModels[0]) : null;
@@ -839,8 +848,10 @@
 				? model.id
 				: null;
 		const seeded = history.currentId !== null;
-		if (modelId === greetingModelId && (seeded || !modelId)) return;
+		if (modelId === greetingModelId && (seeded || !modelId || greetingChoices?.modelId === modelId))
+			return;
 		greetingModelId = modelId;
+		greetingChoices = null;
 
 		let greetings: string[] = [];
 		if (modelId) {
@@ -853,6 +864,17 @@
 		// The selection or the chat may have changed while the greetings loaded.
 		if (greetingModelId !== modelId || $chatId || !hasOnlyGreetings()) return;
 
+		if (modelId && greetings.length && !($settings?.characterCardGreeting ?? false)) {
+			if (seeded) history = { messages: {}, currentId: null } as any;
+			greetingChoices = { modelId, name: model.name ?? model.id, greetings };
+			return;
+		}
+		seedGreetings(model, greetings, 0);
+	};
+
+	// Put greetings in the chat as root assistant messages (siblings, so the arrows swipe between
+	// them), showing ``current``.
+	const seedGreetings = (model: any, greetings: string[], current: number) => {
 		const timestamp = Math.floor(Date.now() / 1000);
 		const messages = Object.fromEntries(
 			greetings.map((content) => {
@@ -875,7 +897,38 @@
 				];
 			})
 		);
-		history = { messages, currentId: Object.keys(messages)[0] ?? null } as any;
+		history = { messages, currentId: Object.keys(messages)[current] ?? null } as any;
+	};
+
+	const pickGreeting = (index: number) => {
+		const choices = greetingChoices;
+		const model = $models.find((m) => m.id === choices?.modelId);
+		if (!choices || !model || $chatId || !hasOnlyGreetings()) return;
+		seedGreetings(model, choices.greetings, index);
+		greetingChoices = null;
+	};
+
+	// The character writes a fresh first message from what it remembers about the user; the card's
+	// greetings stay as siblings to swipe to.
+	const writeOpening = async () => {
+		const choices = greetingChoices;
+		const model = $models.find((m) => m.id === choices?.modelId);
+		if (!choices || !model || openingBusy) return;
+		openingBusy = true;
+		try {
+			const { content } = await writeCharacterOpening(localStorage.token, {
+				model_id: model.id,
+				messages: [],
+				persona_id: $chatPersonaId
+			});
+			if (greetingChoices !== choices || $chatId || !hasOnlyGreetings()) return;
+			seedGreetings(model, [content, ...choices.greetings], 0);
+			greetingChoices = null;
+		} catch (error: any) {
+			toast.error(`${error?.detail ?? error}`);
+		} finally {
+			openingBusy = false;
+		}
 	};
 
 	const mergeFiles = (current, incoming) => {
@@ -5433,6 +5486,10 @@
 							<div class="flex items-center h-full">
 								<Placeholder
 									callActive={!!(bridge?.connected || bridge?.connecting)}
+									greetingChoices={greetingChoices && !$chatId ? greetingChoices : null}
+									{openingBusy}
+									onPickGreeting={pickGreeting}
+									onOpening={writeOpening}
 									bind:selectedModelIdx
 									{history}
 									bind:selectedModels

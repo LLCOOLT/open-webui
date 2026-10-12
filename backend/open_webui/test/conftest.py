@@ -12,8 +12,9 @@ os.environ.setdefault('DATA_DIR', tempfile.mkdtemp(prefix='open-webui-test-'))
 # open_webui.config empties STATIC_DIR on import; keep it away from the tracked static assets.
 os.environ.setdefault('STATIC_DIR', tempfile.mkdtemp(prefix='open-webui-test-static-'))
 # With only backend/requirements-slim.txt installed, run as the slim image does so config and
-# storage do not import the full install's packages (chromadb, cloud storage SDKs).
-if importlib.util.find_spec('boto3') is None:
+# storage do not import the full install's packages (chromadb, cloud storage SDKs). boto3 is
+# imported by storage either way, so it is not a sign of the full install.
+if importlib.util.find_spec('chromadb') is None:
     os.environ.setdefault('USE_SLIM_DOCKER', 'true')
 
 
