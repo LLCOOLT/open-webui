@@ -52,7 +52,7 @@
 		const canViewPrompts = $user?.role === 'admin' || $user?.permissions?.workspace?.prompts;
 		const canViewSkills = $user?.role === 'admin' || $user?.permissions?.workspace?.skills;
 		const canViewTools =
-			$config?.features?.enable_plugins &&
+			$config?.features?.enable_tools &&
 			($user?.role === 'admin' || $user?.permissions?.workspace?.tools);
 		const canViewLorebooks =
 			$config?.features?.enable_character_cards &&
@@ -99,7 +99,7 @@
 				goto('/', { replaceState: true });
 			} else if (
 				$page.url.pathname.includes('/tools') &&
-				(!$config?.features?.enable_plugins || !$user?.permissions?.workspace?.tools)
+				(!$config?.features?.enable_tools || !$user?.permissions?.workspace?.tools)
 			) {
 				goto('/', { replaceState: true });
 			} else if ($page.url.pathname.includes('/skills') && !$user?.permissions?.workspace?.skills) {
@@ -227,7 +227,7 @@
 							</a>
 						{/if}
 
-						{#if $config?.features?.enable_plugins && ($user?.role === 'admin' || $user?.permissions?.workspace?.tools)}
+						{#if $config?.features?.enable_tools && ($user?.role === 'admin' || $user?.permissions?.workspace?.tools)}
 							<a
 								draggable="false"
 								aria-current={activeWorkspaceSection === 'tools' ? 'page' : null}
@@ -272,7 +272,10 @@
 		</nav>
 
 		<div
-			class="  pb-1 px-3 flex-1 min-w-0 max-h-full overflow-y-auto overflow-x-hidden"
+			class="pb-1 flex-1 min-w-0 max-h-full overflow-y-auto overflow-x-hidden"
+			class:px-3={!['/workspace/models/create', '/workspace/models/edit'].includes(
+				$page.url.pathname
+			)}
 			id="workspace-container"
 		>
 			<slot />
