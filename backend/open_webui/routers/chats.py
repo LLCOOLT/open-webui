@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
@@ -35,6 +36,7 @@ from open_webui.models.chats import (
 )
 from open_webui.models.config import Config
 from open_webui.models.folders import Folders
+from open_webui.models.character_memories import CharacterMemories
 from open_webui.models.lorebooks import Lorebooks
 from open_webui.models.shared_chats import ChatShareMode, ShareChatForm, SharedChatResponse, SharedChats
 from open_webui.models.tags import TagModel, Tags
@@ -54,6 +56,7 @@ from open_webui.utils.roleplay.assist import (
     clean_impersonation,
     impersonate_prompt,
     lore_prompt,
+    message_text,
     parse_lore_suggestions,
     scene_prompt,
     transcript,
@@ -68,6 +71,16 @@ from open_webui.utils.roleplay.memory import (
 )
 from open_webui.utils.roleplay.persona import persona_description, resolve_persona
 from open_webui.utils.roleplay.prompt import build_macro_context
+from open_webui.utils.roleplay.recall import (
+    AUTO_INTERVAL,
+    build_recall_prompt,
+    messages_since,
+    parse_recall_reply,
+    recall_available,
+    recall_enabled_for_chat,
+    recall_source,
+    recall_template,
+)
 from open_webui.utils.roleplay.task_model import run_task_prompt
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1440,6 +1453,8 @@ class ChatRoleplaySettings(BaseModel):
     persona_id: str | None = None
     # Long-chat memory for this chat (character chats); on unless turned off.
     memory_enabled: bool = True
+    # Let the character remember this chat in later ones; on unless turned off.
+    recall_enabled: bool = True
 
 
 def _roleplay_settings(meta: dict) -> ChatRoleplaySettings:
@@ -1449,6 +1464,7 @@ def _roleplay_settings(meta: dict) -> ChatRoleplaySettings:
             authors_note=meta.get('authors_note') or None,
             persona_id=meta.get('persona_id'),
             memory_enabled=memory_enabled_for_chat(meta),
+            recall_enabled=recall_enabled_for_chat(meta),
         )
     except ValueError:
         return ChatRoleplaySettings()
@@ -1484,6 +1500,7 @@ async def update_chat_roleplay_settings(
             'authors_note': note.model_dump() if note else None,
             'persona_id': form_data.persona_id,
             'memory_enabled': form_data.memory_enabled,
+            'recall_enabled': form_data.recall_enabled,
         },
         db=db,
     )
@@ -1765,6 +1782,169 @@ async def suggest_lore_entries(
         log.info('Lorebook suggestions failed for %s: %s', model.id, error)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='The model did not answer.') from error
     return LoreSuggestionsResponse(suggestions=parse_lore_suggestions(reply, existing, ctx), source=source)
+
+
+############################
+# Character memory across chats (recall)
+############################
+
+
+class ChatRecallEntry(BaseModel):
+    id: str | None = Field(default=None, max_length=64)
+    content: str = Field(max_length=2_000)
+
+
+class ChatRecallForm(BaseModel):
+    entries: list[ChatRecallEntry] = Field(default_factory=list, max_length=200)
+
+
+class ChatRecallRefreshForm(BaseModel):
+    # Automatic (after a reply): only once enough new messages are in the chat, and never an error
+    # when recall is off somewhere.
+    auto: bool = False
+
+
+class ChatRecallResponse(BaseModel):
+    available: bool  # recall is on for this server
+    enabled: bool  # ... for this chat
+    character_enabled: bool  # ... and for this character
+    model_id: str
+    char: str = ''
+    entries: list[dict] = []
+    updated: bool = False  # this call changed the memory
+    new_messages: int = 0  # messages since the memory was last updated from this chat
+
+
+async def _recall_context(request: Request, id: str, user, db):
+    chat, messages_map, current_id = await _chat_branch(id, user, db)
+    ids = branch_message_ids(messages_map, current_id)
+    message_list = [messages_map[key] for key in ids]
+    model_id = next((m.get('model') for m in reversed(message_list) if m.get('model')), None) or next(
+        iter((chat.chat or {}).get('models') or []), None
+    )
+    if not model_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='No model found for this chat.')
+    model, character, ctx = await _roleplay_context(
+        request, RoleplayAssistForm(model_id=model_id, chat_id=id), user, db
+    )
+    return chat, messages_map, current_id, ids, model, character, ctx
+
+
+async def _recall_response(chat, model, character, ctx, entries: list[dict], **extra) -> ChatRecallResponse:
+    return ChatRecallResponse(
+        available=await recall_available(),
+        enabled=recall_enabled_for_chat(chat.meta or {}),
+        character_enabled=character.recall_enabled,
+        model_id=model.id,
+        char=ctx.char,
+        entries=entries,
+        **extra,
+    )
+
+
+def _new_recall_messages(messages_map: dict, ids: list[str], chat_meta: dict) -> list[dict]:
+    """The user and assistant messages since the chat's last recall update."""
+    since = messages_since(ids, (chat_meta or {}).get('recall_message_id'))
+    return [
+        messages_map[key]
+        for key in since
+        if (messages_map[key] or {}).get('role') in ('user', 'assistant') and message_text(messages_map[key] or {})
+    ]
+
+
+@router.get('/{id}/roleplay/recall', response_model=ChatRecallResponse)
+async def get_chat_recall(
+    request: Request, id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+):
+    """What this chat's character remembers about the user, from this and earlier chats."""
+    chat, messages_map, _, ids, model, character, ctx = await _recall_context(request, id, user, db)
+    entries = await CharacterMemories.get_entries(user.id, model.id, db=db)
+    return await _recall_response(
+        chat, model, character, ctx, entries, new_messages=len(_new_recall_messages(messages_map, ids, chat.meta))
+    )
+
+
+@router.post('/{id}/roleplay/recall', response_model=ChatRecallResponse)
+async def update_chat_recall(
+    request: Request,
+    id: str,
+    form_data: ChatRecallForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Edit the character's memory of the user; an empty list forgets everything."""
+    chat, messages_map, _, ids, model, character, ctx = await _recall_context(request, id, user, db)
+    existing = {entry['id']: entry for entry in await CharacterMemories.get_entries(user.id, model.id, db=db)}
+    now = int(time.time())
+    entries = []
+    for item in form_data.entries:
+        known = existing.get(item.id) if item.id else None
+        if known is not None:
+            changed = known['content'].strip() != item.content.strip()
+            entries.append({**known, 'content': item.content, 'updated_at': now if changed else known['updated_at']})
+        else:
+            entries.append({'content': item.content, 'chat_id': id})
+    memory = await CharacterMemories.set_entries(user.id, model.id, entries, chat_id=id, db=db)
+    return await _recall_response(
+        chat,
+        model,
+        character,
+        ctx,
+        memory.entries,
+        updated=True,
+        new_messages=len(_new_recall_messages(messages_map, ids, chat.meta)),
+    )
+
+
+@router.post('/{id}/roleplay/recall/refresh', response_model=ChatRecallResponse)
+async def refresh_chat_recall(
+    request: Request,
+    id: str,
+    form_data: ChatRecallRefreshForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Update the character's memory of the user from this chat: the story memory plus the messages
+    since the last update, rewritten by the task model into the complete new list."""
+    chat, messages_map, current_id, ids, model, character, ctx = await _recall_context(request, id, user, db)
+    existing = await CharacterMemories.get_entries(user.id, model.id, db=db)
+    new_messages = _new_recall_messages(messages_map, ids, chat.meta)
+
+    def skipped(reason: str):
+        if form_data.auto:
+            return _recall_response(chat, model, character, ctx, existing, new_messages=len(new_messages))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
+
+    if not await recall_available():
+        return await skipped('Character memory is turned off.')
+    if not character.recall_enabled:
+        return await skipped('This character does not keep memories of users.')
+    if not recall_enabled_for_chat(chat.meta or {}):
+        return await skipped('Character memory is turned off for this chat.')
+    if form_data.auto and len(new_messages) < AUTO_INTERVAL:
+        return await skipped('')
+    summary = latest_memory(messages_map, current_id)['summary']
+    source = recall_source(summary, new_messages, ctx.char, ctx.user)
+    if not source.strip():
+        return await skipped('Nothing new to remember yet.')
+    if form_data.auto and await has_active_tasks(request.app.state.redis, id):
+        return await skipped('')
+
+    prompt = build_recall_prompt(await recall_template(), existing, source, ctx.char, ctx.user)
+    skip_character_system_prompt(request, model.id)
+    try:
+        reply = await run_task_prompt(request, user, model.id, prompt, 'character_recall')
+        entries = parse_recall_reply(reply, existing, chat_id=id)
+    except Exception as error:
+        log.info('Character memory update failed for %s: %s', model.id, error)
+        if form_data.auto:
+            return await _recall_response(chat, model, character, ctx, existing, new_messages=len(new_messages))
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='The model did not answer.') from error
+    memory = await CharacterMemories.set_entries(user.id, model.id, entries, chat_id=id, db=db)
+    if ids:
+        await Chats.update_chat_meta_by_id_and_user_id(id, user.id, {'recall_message_id': ids[-1]}, db=db)
+    changed = [entry['content'] for entry in memory.entries] != [entry['content'] for entry in existing]
+    return await _recall_response(chat, model, character, ctx, memory.entries, updated=changed, new_messages=0)
 
 
 @router.get('/{id}', response_model=ChatResponse | None)

@@ -156,8 +156,13 @@ def system_prompt_parts(
     lore_before: list[str] | None = None,
     lore_after: list[str] | None = None,
     persona: str = '',
+    recall: str = '',
 ) -> list[str]:
-    """The unexpanded parts of the system block, in order. Only the first may use ``{{original}}``."""
+    """The unexpanded parts of the system block, in order. Only the first may use ``{{original}}``.
+
+    ``recall`` is what the character remembers about this user from earlier chats; it follows the
+    persona, which it is about.
+    """
     return [
         _system_prompt_part(character),
         *(lore_before or []),
@@ -166,6 +171,7 @@ def system_prompt_parts(
         'Scenario: ' + character.scenario if character.scenario.strip() else '',
         *(lore_after or []),
         persona,
+        recall,
         examples_as_text(character) if character.example_mode == 'system' else '',
     ]
 
@@ -175,8 +181,9 @@ def render_system_prompt(
     ctx: MacroContext,
     lore_before: list[str] | None = None,
     lore_after: list[str] | None = None,
+    recall: str = '',
 ) -> str:
-    parts = system_prompt_parts(character, lore_before, lore_after, ctx.persona)
+    parts = system_prompt_parts(character, lore_before, lore_after, ctx.persona, recall)
     rendered = [expand_macros(part, ctx, allow_original=index == 0).strip() for index, part in enumerate(parts)]
     return '\n\n'.join(part for part in rendered if part)
 
@@ -304,10 +311,13 @@ def apply_character_system_prompt(
     character: CharacterMeta,
     ctx: MacroContext,
     lore: Activation | None = None,
+    recall: str = '',
 ) -> list[dict]:
     """Replace the leading system message (already captured as ``ctx.original``) with the character block."""
     rest = messages[_history_start(messages) :]
-    system = render_system_prompt(character, ctx, lore.before_char if lore else None, lore.after_char if lore else None)
+    system = render_system_prompt(
+        character, ctx, lore.before_char if lore else None, lore.after_char if lore else None, recall
+    )
     return [{'role': 'system', 'content': system}, *rest] if system else rest
 
 

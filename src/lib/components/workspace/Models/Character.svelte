@@ -140,6 +140,7 @@
 		depth_prompt: { text: '', depth: 4, role: 'system' },
 		example_mode: 'system',
 		reply_cleanup: defaultCleanup(),
+		recall_enabled: true,
 		creator: '',
 		creator_notes: ''
 	});
@@ -627,6 +628,25 @@
 						</button>
 					</div>
 				</div>
+			</div>
+
+			<div>
+				<div class={labelClass}>{$i18n.t('Memory Across Chats')}</div>
+				<label class="flex items-center justify-between gap-2 text-xs">
+					<span>
+						{$i18n.t('Remember each user across chats')}
+						<span class="block text-[0.6875rem] text-gray-400">
+							{$i18n.t(
+								'{{CHAR}} keeps a short memory of what each user shared and what happened between them, updated every few messages. Each user sees and edits only their own.',
+								{ CHAR: '{{char}}', interpolation: { escapeValue: false } }
+							)}
+						</span>
+					</span>
+					<Switch
+						state={character.recall_enabled ?? true}
+						on:change={(event) => setField('recall_enabled', event.detail)}
+					/>
+				</label>
 			</div>
 
 			<div class="flex gap-3">

@@ -728,12 +728,19 @@ export const deleteCharacterExpression = async (
 	return response.json();
 };
 
+// With `forSpeech`, a character without expression images is classified against the default
+// emotions, for emotion-aware speech.
 export const classifyCharacterExpression = (
 	token: string,
 	modelId: string,
-	text: string
+	text: string,
+	forSpeech = false
 ): Promise<{ name: string | null }> =>
-	postJson(token, '/models/model/character/expression/classify', { model_id: modelId, text });
+	postJson(token, '/models/model/character/expression/classify', {
+		model_id: modelId,
+		text,
+		for_speech: forSpeech
+	});
 
 // Draws one expression image (from the avatar when image editing is set up).
 export const generateCharacterExpression = (

@@ -59,6 +59,13 @@ from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import include_user_info_headers
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.misc import strict_match_mime_type
+from open_webui.utils.roleplay.emotion import (
+    azure_style,
+    clean_emotion_name,
+    elevenlabs_settings,
+    elevenlabs_tag,
+    speech_instruction,
+)
 from open_webui.utils.session_pool import get_session
 from pydantic import BaseModel, Field
 
@@ -92,6 +99,7 @@ TTS_CONFIG_KEYS = {
     'VOICE': 'audio.tts.voice',
     'REALTIME_TTS_PROMPT_TEMPLATE': 'audio.tts.realtime.prompt_template',
     'SPLIT_ON': 'audio.tts.split_on',
+    'EXPRESSIVE': 'audio.tts.expressive',
     'AZURE_SPEECH_REGION': 'audio.tts.azure.speech_region',
     'AZURE_SPEECH_BASE_URL': 'audio.tts.azure.speech_base_url',
     'AZURE_SPEECH_OUTPUT_FORMAT': 'audio.tts.azure.speech_output_format',
@@ -264,6 +272,8 @@ class TTSConfigForm(BaseModel):
     VOICE: str
     REALTIME_TTS_PROMPT_TEMPLATE: Optional[str] = None
     SPLIT_ON: str
+    # Speak character replies in the emotion picked for them (see ``utils.roleplay.emotion``).
+    EXPRESSIVE: bool = True
     AZURE_SPEECH_REGION: str
     AZURE_SPEECH_BASE_URL: str
     AZURE_SPEECH_OUTPUT_FORMAT: str
@@ -428,12 +438,21 @@ async def _write_tts_cache(
         await f.write(JSONCodec.dumps(payload))
 
 
+def _openai_takes_instructions(model: str | None) -> bool:
+    """OpenAI's ``instructions`` field is rejected by the tts-1 models and taken by the newer ones."""
+    return not (model or '').strip().lower().startswith('tts-1')
+
+
 async def _tts_openai(request, payload, file_path, file_body_path, user):
     """Generate speech via an OpenAI-compatible TTS endpoint."""
+    emotion = payload.pop('emotion', '')
     payload['model'] = await Config.get('audio.tts.model')
     if not payload.get('voice'):
         payload['voice'] = await Config.get('audio.tts.voice')
     payload = {**payload, **(await Config.get('audio.tts.openai.params') or {})}
+    instruction = speech_instruction(emotion) if emotion and _openai_takes_instructions(payload['model']) else ''
+    if instruction:
+        payload['instructions'] = f'{payload.get("instructions") or ""}\n{instruction}'.strip()
     api_key = await Config.get('audio.tts.openai.api_key')
     api_base_url = await Config.get('audio.tts.openai.api_base_url')
 
@@ -605,15 +624,22 @@ async def _tts_elevenlabs(request, payload, file_path, file_body_path, user):
     if available_voices and voice_id not in available_voices:
         raise HTTPException(status_code=400, detail='Invalid voice id')
 
+    emotion = payload.get('emotion') or ''
+    model_id = await Config.get('audio.tts.model')
+    text = payload['input']
+    tag = elevenlabs_tag(emotion) if emotion and 'v3' in (model_id or '') else None
+    if tag:
+        text = f'[{tag}] {text}'
+
     r = None
     try:
         session = await get_session()
         async with session.post(
             f'{ELEVENLABS_API_BASE_URL}/v1/text-to-speech/{voice_id}',
             json={
-                'text': payload['input'],
-                'model_id': await Config.get('audio.tts.model'),
-                'voice_settings': {'stability': 0.5, 'similarity_boost': 0.5},
+                'text': text,
+                'model_id': model_id,
+                'voice_settings': elevenlabs_settings(emotion),
             },
             headers={
                 'Accept': 'audio/mpeg',
@@ -639,9 +665,15 @@ async def _tts_azure(request, payload, file_path, file_body_path, user):
     locale = '-'.join(language.split('-')[:2])
     output_format = await Config.get('audio.tts.azure.speech_output_format')
 
+    emotion = payload.get('emotion') or ''
+    style = azure_style(emotion) if emotion else None
+    text = html.escape(payload['input'])
+    if style:
+        text = f'<mstts:express-as style="{html.escape(style)}">{text}</mstts:express-as>'
     ssml = (
-        f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="{html.escape(locale)}">'
-        f'<voice name="{html.escape(language)}">{html.escape(payload["input"])}</voice>'
+        f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+        f'xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="{html.escape(locale)}">'
+        f'<voice name="{html.escape(language)}">{text}</voice>'
         f'</speak>'
     )
 
@@ -753,6 +785,15 @@ _TTS_ENGINES = {
 }
 
 
+async def _speech_emotion(payload: dict) -> str:
+    """The cleaned ``emotion`` of a speech request (an expression name), or '' when there is none
+    or expressive speech is turned off."""
+    name = clean_emotion_name(payload.get('emotion'))
+    if not name or not await Config.get('audio.tts.expressive'):
+        return ''
+    return name
+
+
 @router.post('/speech')
 async def speech(request: Request, user=Depends(get_verified_user)):
     engine = await Config.get('audio.tts.engine')
@@ -800,10 +841,14 @@ async def speech(request: Request, user=Depends(get_verified_user)):
             valid = False
         if not valid:
             raise HTTPException(400, 'OpenAI Realtime requires an HTTP(S) API base URL without credentials or a query.')
+        emotion = await _speech_emotion(payload)
         payload = {'input': text, 'model': model.strip(), 'voice': voice.strip(), 'api_base_url': base_url}
         payload['instructions'] = (
             await Config.get('audio.tts.realtime.prompt_template') or DEFAULT_REALTIME_TTS_PROMPT_TEMPLATE
         )
+        instruction = speech_instruction(emotion) if emotion else ''
+        if instruction:
+            payload['instructions'] = f'{payload["instructions"]}\n{instruction}'
         name = hashlib.sha256(JSONCodec.dumps({'engine': engine, **payload}).encode('utf-8')).hexdigest()
     else:
         name = hashlib.sha256(
@@ -838,6 +883,13 @@ async def speech(request: Request, user=Depends(get_verified_user)):
         except Exception as exc:
             log.exception(exc)
             raise HTTPException(status_code=400, detail='Invalid JSON payload')
+        if not isinstance(payload, dict):
+            raise HTTPException(400, 'Speech payload must be an object.')
+        emotion = await _speech_emotion(payload)
+        if emotion:
+            payload['emotion'] = emotion
+        else:
+            payload.pop('emotion', None)
 
     handler = _TTS_ENGINES.get(engine)
     if handler is None:

@@ -73,6 +73,7 @@
 	let chatFadeStreamingText = true;
 	let roleplayFormatting = true;
 	let autoPlayCharacterVoice = false;
+	let expressiveSpeech = true;
 	let characterExpressions = true;
 	let characterPortrait = true;
 	let collapseCodeBlocks = false;
@@ -336,6 +337,7 @@
 		chatFadeStreamingText = currentSettings?.chatFadeStreamingText ?? true;
 		roleplayFormatting = currentSettings?.roleplayFormatting ?? true;
 		autoPlayCharacterVoice = currentSettings?.autoPlayCharacterVoice ?? false;
+		expressiveSpeech = currentSettings?.expressiveSpeech ?? true;
 		characterExpressions = currentSettings?.characterExpressions ?? true;
 		characterPortrait = currentSettings?.characterPortrait ?? true;
 
@@ -1007,6 +1009,32 @@
 				{$i18n.t('Read replies aloud when the character has its own voice set.')}
 			</p>
 		</div>
+
+		{#if $config?.audio?.tts?.expressive ?? true}
+			<div>
+				<div class={settingRowClass}>
+					<div id="expressive-speech-label" class={settingLabelClass}>
+						{$i18n.t('Expressive character voices')}
+					</div>
+					<div class={settingControlClass}>
+						<Switch
+							ariaLabelledbyId="expressive-speech-label"
+							tooltip={true}
+							bind:state={expressiveSpeech}
+							inherited={isDefaultSetting('expressiveSpeech')}
+							on:change={() => {
+								saveSettings({ expressiveSpeech });
+							}}
+						/>
+					</div>
+				</div>
+				<p class={settingDescriptionClass}>
+					{$i18n.t(
+						"Speak each character reply in the emotion picked for it (using the task model), on voice engines that can: OpenAI's newer speech models, OpenAI Realtime, ElevenLabs and Azure."
+					)}
+				</p>
+			</div>
+		{/if}
 
 		<div>
 			<div class={settingRowClass}>

@@ -100,7 +100,9 @@ export const synthesizeOpenAISpeech = async (
 	token: string = '',
 	speaker: string = 'alloy',
 	text: string = '',
-	model?: string
+	model?: string,
+	// An expression name (joy, sad, smirk…) the engine should speak in, when it can.
+	emotion?: string | null
 ) => {
 	let error = null;
 
@@ -113,7 +115,8 @@ export const synthesizeOpenAISpeech = async (
 		body: JSON.stringify({
 			input: text,
 			voice: speaker,
-			...(model && { model })
+			...(model && { model }),
+			...(emotion && { emotion })
 		})
 	})
 		.then(async (res) => {

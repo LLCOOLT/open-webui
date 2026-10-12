@@ -2340,6 +2340,7 @@ async def get_app_config(request: Request):
         'automations.enable',
         'notes.enable',
         'characters.enable',
+        'characters.recall.enable',
         'chat.context_compaction.enable',
         'chat.tool_permissions.enable',
         'web.search.enable',
@@ -2370,6 +2371,7 @@ async def get_app_config(request: Request):
         'audio.tts.engine',
         'audio.tts.voice',
         'audio.tts.split_on',
+        'audio.tts.expressive',
         'audio.stt.engine',
         'rag.file.max_size',
         'rag.file.max_count',
@@ -2436,6 +2438,8 @@ async def get_app_config(request: Request):
                     'enable_automations': config.get('automations.enable'),
                     'enable_notes': config.get('notes.enable'),
                     'enable_character_cards': config.get('characters.enable'),
+                    'enable_character_recall': bool(config.get('characters.enable'))
+                    and bool(config.get('characters.recall.enable')),
                     'enable_context_compaction': config.get('chat.context_compaction.enable'),
                     'enable_tool_permissions': config.get('chat.tool_permissions.enable'),
                     'enable_web_search': config.get('web.search.enable'),
@@ -2489,6 +2493,7 @@ async def get_app_config(request: Request):
                         'engine': config.get('audio.tts.engine'),
                         'voice': config.get('audio.tts.voice'),
                         'split_on': config.get('audio.tts.split_on'),
+                        'expressive': config.get('audio.tts.expressive'),
                     },
                     'stt': {
                         'engine': config.get('audio.stt.engine'),

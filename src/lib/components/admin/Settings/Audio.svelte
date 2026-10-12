@@ -51,6 +51,7 @@
 	let REALTIME_TTS_PROMPT_TEMPLATE = '';
 	let TTS_OPENAI_PARAMS = '';
 	let TTS_SPLIT_ON: TTS_RESPONSE_SPLIT = TTS_RESPONSE_SPLIT.PUNCTUATION;
+	let TTS_EXPRESSIVE = true;
 	let TTS_AZURE_SPEECH_REGION = '';
 	let TTS_AZURE_SPEECH_BASE_URL = '';
 	let TTS_AZURE_SPEECH_OUTPUT_FORMAT = '';
@@ -170,7 +171,8 @@
 				AZURE_SPEECH_OUTPUT_FORMAT: TTS_AZURE_SPEECH_OUTPUT_FORMAT,
 				MISTRAL_API_KEY: TTS_MISTRAL_API_KEY,
 				MISTRAL_API_BASE_URL: TTS_MISTRAL_API_BASE_URL,
-				SPLIT_ON: TTS_SPLIT_ON
+				SPLIT_ON: TTS_SPLIT_ON,
+				EXPRESSIVE: TTS_EXPRESSIVE
 			},
 			stt: {
 				OPENAI_API_BASE_URL: STT_OPENAI_API_BASE_URL,
@@ -220,6 +222,7 @@
 			REALTIME_TTS_PROMPT_TEMPLATE = res.tts.REALTIME_TTS_PROMPT_TEMPLATE ?? '';
 
 			TTS_SPLIT_ON = res.tts.SPLIT_ON || TTS_RESPONSE_SPLIT.PUNCTUATION;
+			TTS_EXPRESSIVE = res.tts.EXPRESSIVE ?? true;
 
 			TTS_AZURE_SPEECH_REGION = res.tts.AZURE_SPEECH_REGION;
 			TTS_AZURE_SPEECH_BASE_URL = res.tts.AZURE_SPEECH_BASE_URL;
@@ -794,6 +797,18 @@
 					<option value={model.id} class="bg-gray-50 dark:bg-gray-700"></option>
 				{/each}
 			</datalist>
+
+			{#if ['openai', 'openai-realtime', 'elevenlabs', 'azure'].includes(TTS_ENGINE)}
+				<AdminSettingRow
+					label={$i18n.t('Expressive speech')}
+					description={$i18n.t(
+						"Speak character replies in the emotion picked for them: an instruction for OpenAI's newer speech models and Realtime, voice settings and v3 audio tags for ElevenLabs, speaking styles for Azure."
+					)}
+					let:labelId
+				>
+					<Switch bind:state={TTS_EXPRESSIVE} ariaLabelledbyId={labelId} />
+				</AdminSettingRow>
+			{/if}
 
 			<AdminSettingRow
 				label={$i18n.t('settings.admin.audio.responseSplitting.label')}

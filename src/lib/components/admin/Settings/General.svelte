@@ -406,6 +406,33 @@
 							/>
 						</AdminSettingField>
 					{/if}
+					<AdminSettingRow
+						label={$i18n.t('Character memory across chats')}
+						description={$i18n.t(
+							'Characters remember what each user shared and what happened between them from one chat to the next, kept per user and updated by the task model every few messages.'
+						)}
+						let:labelId
+					>
+						<Switch bind:state={adminConfig.ENABLE_CHARACTER_RECALL} ariaLabelledbyId={labelId} />
+					</AdminSettingRow>
+					{#if adminConfig.ENABLE_CHARACTER_RECALL}
+						<AdminSettingField
+							label={$i18n.t('Character memory prompt')}
+							description={$i18n.t(
+								'Rewrites the memory from the chat. Available macros: {{MACROS}}',
+								{
+									MACROS: '{{char}}, {{user}}, {{MEMORY}}, {{SOURCE}}, {{MAX}}',
+									interpolation: { escapeValue: false }
+								}
+							)}
+						>
+							<Textarea
+								className={textareaClass}
+								placeholder={$i18n.t('Leave empty to use the default prompt')}
+								bind:value={adminConfig.CHARACTER_RECALL_PROMPT}
+							/>
+						</AdminSettingField>
+					{/if}
 				{/if}
 				<AdminSettingRow
 					label={$i18n.t('settings.admin.general.channels.label')}

@@ -1659,6 +1659,10 @@ REALTIME_CALL_PROMPT_TEMPLATE = os.getenv('REALTIME_CALL_PROMPT_TEMPLATE')
 
 AUDIO_TTS_SPLIT_ON = os.getenv('AUDIO_TTS_SPLIT_ON', 'punctuation')
 
+# Speak character replies in the emotion picked for them, on engines that can (OpenAI, OpenAI
+# Realtime, ElevenLabs, Azure).
+AUDIO_TTS_EXPRESSIVE = os.getenv('AUDIO_TTS_EXPRESSIVE', 'True').lower() == 'true'
+
 AUDIO_TTS_AZURE_SPEECH_REGION = os.getenv('AUDIO_TTS_AZURE_SPEECH_REGION', '')
 
 AUDIO_TTS_AZURE_SPEECH_BASE_URL = os.getenv('AUDIO_TTS_AZURE_SPEECH_BASE_URL', '')
@@ -2108,6 +2112,12 @@ except ValueError:
     CHARACTER_MEMORY_TOKEN_THRESHOLD = 12000
 # Empty uses the built-in story memory prompt.
 CHARACTER_MEMORY_PROMPT = os.getenv('CHARACTER_MEMORY_PROMPT', '')
+
+# Character memory across chats: what a character remembers about a user from their earlier chats,
+# kept per user and character and updated by the task model as chats go on.
+ENABLE_CHARACTER_RECALL = os.getenv('ENABLE_CHARACTER_RECALL', 'True').lower() == 'true'
+# Empty uses the built-in prompt.
+CHARACTER_RECALL_PROMPT = os.getenv('CHARACTER_RECALL_PROMPT', '')
 
 ENABLE_USER_STATUS = os.getenv('ENABLE_USER_STATUS', 'True').lower() == 'true'
 
@@ -3175,6 +3185,7 @@ DEFAULT_CONFIG = {
     'audio.tts.voice': AUDIO_TTS_VOICE,
     'audio.tts.realtime.prompt_template': REALTIME_TTS_PROMPT_TEMPLATE,
     'audio.tts.split_on': AUDIO_TTS_SPLIT_ON,
+    'audio.tts.expressive': AUDIO_TTS_EXPRESSIVE,
     'audio.tts.azure.speech_region': AUDIO_TTS_AZURE_SPEECH_REGION,
     'audio.tts.azure.speech_base_url': AUDIO_TTS_AZURE_SPEECH_BASE_URL,
     'audio.tts.azure.speech_output_format': AUDIO_TTS_AZURE_SPEECH_OUTPUT_FORMAT,
@@ -3223,6 +3234,8 @@ DEFAULT_CONFIG = {
     'characters.memory.enable': ENABLE_CHARACTER_MEMORY,
     'characters.memory.token_threshold': CHARACTER_MEMORY_TOKEN_THRESHOLD,
     'characters.memory.prompt': CHARACTER_MEMORY_PROMPT,
+    'characters.recall.enable': ENABLE_CHARACTER_RECALL,
+    'characters.recall.prompt': CHARACTER_RECALL_PROMPT,
     'users.enable_status': ENABLE_USER_STATUS,
     'evaluation.arena.enable': ENABLE_EVALUATION_ARENA_MODELS,
     'evaluation.arena.models': EVALUATION_ARENA_MODELS,

@@ -119,6 +119,7 @@
 		classifyCharacterExpression,
 		getCharacterGreetings
 	} from '$lib/apis/models';
+	import { refreshChatRecall } from '$lib/apis/lorebooks';
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
@@ -3439,10 +3440,35 @@
 			}
 
 			const characterModel = $models.find((m) => m.id === message.model) as any;
+			const character = characterModel?.info?.meta?.character;
 			const characterVoice =
 				($settings?.autoPlayCharacterVoice ?? false) &&
-				!!characterModel?.info?.meta?.character &&
+				!!character &&
 				!!characterModel?.info?.meta?.tts?.voice;
+			const hasExpressions = (character?.expressions ?? []).length > 0;
+			// Emotion-aware speech wants the reply's expression before it is read aloud.
+			const expressiveVoice =
+				characterVoice &&
+				($settings?.expressiveSpeech ?? true) &&
+				($config?.audio?.tts?.expressive ?? true);
+			if (
+				visibleContent.trim() &&
+				((($settings?.characterExpressions ?? true) && hasExpressions) || expressiveVoice)
+			) {
+				// Background: the reply is already shown; its picture follows when the task model answers.
+				const picking = pickExpression(
+					chatId,
+					message.id,
+					characterModel.id,
+					visibleContent,
+					!hasExpressions
+				);
+				if (expressiveVoice) {
+					// Speech waits briefly for the emotion, never long enough to feel stuck.
+					await Promise.race([picking, new Promise((resolve) => setTimeout(resolve, 4000))]);
+				}
+			}
+
 			if (
 				($settings.responseAutoPlayback || characterVoice) &&
 				!$showCallOverlay &&
@@ -3453,12 +3479,13 @@
 			}
 
 			if (
-				($settings?.characterExpressions ?? true) &&
-				(characterModel?.info?.meta?.character?.expressions ?? []).length &&
-				visibleContent.trim()
+				character &&
+				character.recall_enabled !== false &&
+				!$temporaryChatEnabled &&
+				$config?.features?.enable_character_recall
 			) {
-				// Background: the reply is already shown; its picture follows when the task model answers.
-				pickExpression(chatId, message.id, characterModel.id, visibleContent);
+				// Background: the character's memory of the user grows every few messages.
+				refreshRecall(chatId, character);
 			}
 
 			// Emit chat event for TTS (only when call overlay is active)
@@ -4641,9 +4668,37 @@
 		return _chatId;
 	};
 
-	const pickExpression = async (_chatId, messageId, modelId, text) => {
+	// Character memory across chats: ask the server to update it from this chat when enough new
+	// messages are in (it decides), and tell Chat Controls > Roleplay when it changed.
+	const refreshRecall = async (_chatId: string, character: { name?: string } | null) => {
 		try {
-			const { name } = await classifyCharacterExpression(localStorage.token, modelId, text);
+			const result = await refreshChatRecall(localStorage.token, _chatId, true);
+			if (result?.updated && $chatId === _chatId) {
+				toast.info(
+					$i18n.t('{{NAME}} will remember this', { NAME: result.char || character?.name || '' }),
+					{ duration: 3000 }
+				);
+				window.dispatchEvent(new CustomEvent('roleplay:recall-updated'));
+			}
+		} catch (error) {
+			console.debug('Character memory update failed', error);
+		}
+	};
+
+	const pickExpression = async (
+		_chatId: string,
+		messageId: string,
+		modelId: string,
+		text: string,
+		forSpeech = false
+	) => {
+		try {
+			const { name } = await classifyCharacterExpression(
+				localStorage.token,
+				modelId,
+				text,
+				forSpeech
+			);
 			const message = history.messages[messageId];
 			if (!name || !message || $chatId !== _chatId) return;
 			message.expression = name;

@@ -41,6 +41,7 @@ from open_webui.models.access_grants import AccessGrants, normalize_access_grant
 from open_webui.models.config import Config
 from open_webui.models.files import Files
 from open_webui.models.groups import Groups
+from open_webui.models.character_memories import CharacterMemories
 from open_webui.models.lorebooks import LorebookForm, Lorebooks
 from open_webui.models.model_history import ModelHistories, ModelHistoryModel, ModelHistoryResponse
 from open_webui.models.models import (
@@ -85,6 +86,7 @@ from open_webui.utils.roleplay.expressions import (
     pick_expression,
 )
 from open_webui.utils.roleplay.filter import skip_character_system_prompt
+from open_webui.utils.roleplay.emotion import DEFAULT_EMOTIONS
 from open_webui.utils.roleplay.images import avatar_thumbnail_data_uri, ensure_png, expression_image
 from open_webui.utils.roleplay.prompt import build_macro_context
 from open_webui.utils.roleplay.prompt import greetings as character_greetings
@@ -1567,6 +1569,9 @@ async def delete_character_expression(
 class ExpressionClassifyForm(BaseModel):
     model_id: str
     text: str = Field(max_length=200_000)
+    # For emotion-aware speech: a character without expression images is classified against the
+    # default emotions instead of returning nothing.
+    for_speech: bool = False
 
 
 @router.post('/model/character/expression/classify')
@@ -1581,6 +1586,8 @@ async def classify_character_expression(
     model = await _get_character_model(form_data.model_id, user, db, 'read')
     character = model.meta.character
     names = sorted(character.expressions)
+    if not names and form_data.for_speech and await Config.get('audio.tts.expressive'):
+        names = list(DEFAULT_EMOTIONS)
     if not names or not form_data.text.strip():
         return {'name': None}
     if len(names) == 1:
@@ -2315,6 +2322,8 @@ async def delete_model_by_id(
 
     result = await Models.delete_model_by_id(form_data.id, db=db)
     if result:
+        # Every user's memory of a deleted character goes with it.
+        await CharacterMemories.delete_memories_by_model_id(form_data.id, db=db)
         await publish_event(
             request,
             EVENTS.MODEL_DELETED,

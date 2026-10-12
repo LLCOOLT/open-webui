@@ -46,6 +46,8 @@ class CharacterMeta(CharacterData):
     expressions: dict[str, str] = Field(default_factory=dict)
     # What is cut or replaced in finished replies (see ``utils.roleplay.cleanup``).
     reply_cleanup: ReplyCleanup = Field(default_factory=ReplyCleanup)
+    # Remember each user across chats (see ``utils.roleplay.recall``); per user, never shared.
+    recall_enabled: bool = True
 
     @field_validator('expressions', mode='before')
     @classmethod
@@ -115,6 +117,7 @@ SUMMARY_FIELDS = (
     'character_version',
     'spec_version',
     'tags',
+    'recall_enabled',
 )
 
 

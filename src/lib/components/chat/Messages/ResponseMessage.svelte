@@ -46,7 +46,7 @@
 
 	import Name from './Name.svelte';
 	import ProfileImage from './ProfileImage.svelte';
-	import { characterExpressionUrl } from '$lib/apis/models';
+	import { characterExpressionUrl, classifyCharacterExpression } from '$lib/apis/models';
 	import Image from '$lib/components/common/Image.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -312,6 +312,36 @@
 			? ($settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice)
 			: $config?.audio?.tts?.voice);
 
+	// Emotion-aware speech: the expression picked for a character's reply, so the voice engine can
+	// speak it that way. A reply that has none yet (no expression images, or auto-play off) is
+	// classified now against the default emotions.
+	const getSpeechEmotion = async (): Promise<string | null> => {
+		const character = (model as any)?.info?.meta?.character;
+		if (
+			!character ||
+			!($settings?.expressiveSpeech ?? true) ||
+			!($config?.audio?.tts?.expressive ?? true)
+		) {
+			return null;
+		}
+		if (message?.expression) return message.expression;
+		try {
+			const { name } = await classifyCharacterExpression(
+				localStorage.token,
+				(model as any).id,
+				visibleResponseContent,
+				true
+			);
+			if (name && history?.messages?.[messageId]) {
+				history.messages[messageId].expression = name;
+			}
+			return name;
+		} catch (error) {
+			console.debug('Expression classification failed', error);
+			return null;
+		}
+	};
+
 	const speak = async () => {
 		const content = visibleResponseContent;
 		if (!content.trim().length) {
@@ -377,7 +407,17 @@
 			}
 
 			const voiceId = getVoiceId();
-			console.debug('Prepared message content for TTS', messageContentParts, 'voice:', voiceId);
+			const emotion =
+				$settings.audio?.tts?.engine === 'browser-kokoro' ? null : await getSpeechEmotion();
+			if (signal.aborted) return;
+			console.debug(
+				'Prepared message content for TTS',
+				messageContentParts,
+				'voice:',
+				voiceId,
+				'emotion:',
+				emotion
+			);
 
 			if ($settings.audio?.tts?.engine === 'browser-kokoro') {
 				if (!$TTSWorker) {
@@ -413,14 +453,18 @@
 				for (const [, sentence] of messageContentParts.entries()) {
 					if (signal.aborted) return;
 
-					const res = await synthesizeOpenAISpeech(localStorage.token, voiceId, sentence).catch(
-						(error) => {
-							console.error(error);
-							toast.error(`${error}`);
-							speaking = false;
-							loadingSpeech = false;
-						}
-					);
+					const res = await synthesizeOpenAISpeech(
+						localStorage.token,
+						voiceId,
+						sentence,
+						undefined,
+						emotion
+					).catch((error) => {
+						console.error(error);
+						toast.error(`${error}`);
+						speaking = false;
+						loadingSpeech = false;
+					});
 
 					if (signal.aborted) return;
 

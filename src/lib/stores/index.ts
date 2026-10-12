@@ -252,6 +252,7 @@ type Settings = {
 	}[];
 	roleplayFormatting?: boolean;
 	autoPlayCharacterVoice?: boolean;
+	expressiveSpeech?: boolean;
 	characterExpressions?: boolean;
 	characterPortrait?: boolean;
 	toolServers?: never[];
@@ -365,7 +366,7 @@ type Config = {
 	audio?: {
 		realtime?: { enabled: boolean; model: string; voice: string };
 		stt: { engine: string };
-		tts: { engine: string; voice: string; split_on: string };
+		tts: { engine: string; voice: string; split_on: string; expressive?: boolean };
 	};
 	license_metadata: any;
 	status: boolean;
@@ -385,6 +386,7 @@ type Config = {
 		enable_signup: boolean;
 		enable_login_form: boolean;
 		enable_character_cards?: boolean;
+		enable_character_recall?: boolean;
 		enable_web_search?: boolean;
 		enable_web_search_confirmation?: boolean;
 		web_search_confirmation_content?: string;

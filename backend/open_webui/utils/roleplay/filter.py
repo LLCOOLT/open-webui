@@ -15,6 +15,7 @@ import logging
 import re
 from dataclasses import dataclass
 
+from open_webui.models.character_memories import CharacterMemories
 from open_webui.models.chats import Chats
 from open_webui.models.config import Config
 from open_webui.models.lorebooks import Lorebooks
@@ -34,6 +35,7 @@ from open_webui.utils.roleplay.prompt import (
     lore_depth_prompts,
     render_ooc_system_prompt,
 )
+from open_webui.utils.roleplay.recall import recall_block, recall_enabled_for_chat
 from pydantic import ValidationError
 
 log = logging.getLogger(__name__)
@@ -101,6 +103,7 @@ class _RoleplayState:
     lore: Activation | None = None
     ooc: bool = False
     memory: dict | None = None  # compaction settings for this chat (see ``memory_overrides``)
+    recall: list[dict] | None = None  # what the character remembers about this user (see ``recall``)
 
 
 def _authors_note(chat_meta: dict) -> DepthPrompt | None:
@@ -129,12 +132,22 @@ async def _load_lore(model: dict, character: CharacterMeta | None, metadata: dic
     return books, chat_meta
 
 
+async def _load_recall(model: dict, character: CharacterMeta, chat_meta: dict, user) -> list[dict] | None:
+    """The character's memory of this user, when recall is on for the server, character and chat."""
+    if user is None or not character.recall_enabled or not recall_enabled_for_chat(chat_meta):
+        return None
+    if not await Config.get('characters.recall.enable'):
+        return None
+    return await CharacterMemories.get_entries(user.id, model.get('id'))
+
+
 async def apply_character_system(request, form_data: dict, metadata: dict, user, model: dict) -> dict:
     """Build the request's roleplay state; for characters, also swap in the character block.
 
     The user's own system prompt becomes ``{{original}}``. Lorebook entries activated against the
     conversation go into the system block (before/after the description) or, with ``@@depth``, into
-    the history in ``apply_character_messages``.
+    the history in ``apply_character_messages``. What the character remembers about the user from
+    earlier chats follows the persona in the system block.
     """
     if not await Config.get('characters.enable'):
         return form_data
@@ -183,7 +196,14 @@ async def apply_character_system(request, form_data: dict, metadata: dict, user,
             form_data['messages'] = [{'role': 'system', 'content': system}, *rest]
         else:
             state.lore = activate(books, messages) if books else None
-            form_data['messages'] = apply_character_system_prompt(messages, character, state.ctx, state.lore)
+            state.recall = await _load_recall(model, character, chat_meta, user)
+            form_data['messages'] = apply_character_system_prompt(
+                messages,
+                character,
+                state.ctx,
+                state.lore,
+                recall_block(state.recall or [], state.ctx.char, state.ctx.user),
+            )
             if character.reply_cleanup.stop_at_user:
                 add_stop_sequences(form_data, model, state.ctx.user)
         request.state.roleplay_model_id = model.get('id')

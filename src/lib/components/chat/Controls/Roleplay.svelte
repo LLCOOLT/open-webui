@@ -6,14 +6,18 @@
 	import {
 		createLorebook,
 		getChatMemory,
+		getChatRecall,
 		getChatRoleplaySettings,
 		getLorebookById,
 		refreshChatMemory,
+		refreshChatRecall,
 		suggestLoreEntries,
 		updateChatMemory,
+		updateChatRecall,
 		updateChatRoleplaySettings,
 		updateLorebookById,
 		type ChatMemory,
+		type ChatRecall,
 		type ChatRoleplaySettings,
 		type Lorebook
 	} from '$lib/apis/lorebooks';
@@ -85,6 +89,68 @@
 		memoryChanged = true;
 		loadMemory();
 	};
+
+	// Character memory across chats: what the character remembers about the user, one entry per
+	// line, edited in place.
+	let recall: ChatRecall | null = null;
+	let recallDraft = '';
+	let recallEnabled = true;
+	let recallBusy: 'save' | 'refresh' | 'clear' | null = null;
+
+	const recallText = (value: ChatRecall) => value.entries.map((entry) => entry.content).join('\n');
+
+	const setRecall = (value: ChatRecall) => {
+		recall = value;
+		recallDraft = recallText(value);
+	};
+
+	const loadRecall = async () => {
+		if (!loadedFor) return;
+		try {
+			setRecall(await getChatRecall(localStorage.token, loadedFor));
+		} catch {
+			recall = null;
+		}
+	};
+
+	const recallAction = async (action: 'save' | 'refresh' | 'clear') => {
+		if (!loadedFor || !recall) return;
+		recallBusy = action;
+		try {
+			if (action === 'refresh') {
+				const result = await refreshChatRecall(localStorage.token, loadedFor, false);
+				setRecall(result);
+				toast.success(
+					result.updated
+						? $i18n.t('{{NAME}} will remember this', { NAME: result.char })
+						: $i18n.t('Nothing new to remember')
+				);
+			} else {
+				// Lines that still match an entry keep it (and its history); the rest are new.
+				const known = new Map(recall.entries.map((entry) => [entry.content.trim(), entry.id]));
+				const lines =
+					action === 'clear'
+						? []
+						: recallDraft
+								.split('\n')
+								.map((line) => line.replace(/^\s*[-•*]\s*/, '').trim())
+								.filter(Boolean);
+				setRecall(
+					await updateChatRecall(
+						localStorage.token,
+						loadedFor,
+						lines.map((content) => ({ id: known.get(content) ?? null, content }))
+					)
+				);
+			}
+		} catch (error: any) {
+			toast.error(`${error?.detail ?? error}`);
+		} finally {
+			recallBusy = null;
+		}
+	};
+
+	const onRecallUpdated = () => loadRecall();
 
 	// Lorebook suggestions: lasting facts from the story memory, reviewed before they are added.
 	type Suggestion = { name: string; keys: string; content: string; selected: boolean };
@@ -169,8 +235,14 @@
 			addingLore = false;
 		}
 	};
-	onMount(() => window.addEventListener('roleplay:memory-updated', onMemoryUpdated));
-	onDestroy(() => window.removeEventListener('roleplay:memory-updated', onMemoryUpdated));
+	onMount(() => {
+		window.addEventListener('roleplay:memory-updated', onMemoryUpdated);
+		window.addEventListener('roleplay:recall-updated', onRecallUpdated);
+	});
+	onDestroy(() => {
+		window.removeEventListener('roleplay:memory-updated', onMemoryUpdated);
+		window.removeEventListener('roleplay:recall-updated', onRecallUpdated);
+	});
 	$: defaultPersona = personas.find((persona) => persona.is_default);
 
 	const load = async (id: string) => {
@@ -179,7 +251,9 @@
 			chatSettings = await getChatRoleplaySettings(localStorage.token, id);
 			note = chatSettings.authors_note ?? { text: '', depth: 4, role: 'system' };
 			memoryEnabled = chatSettings.memory_enabled ?? true;
+			recallEnabled = chatSettings.recall_enabled ?? true;
 			loadMemory();
+			loadRecall();
 		} catch {
 			chatSettings = null;
 		}
@@ -194,7 +268,8 @@
 					? { ...note, depth: Math.max(0, Number(note.depth) || 0) }
 					: null,
 				persona_id: $chatPersonaId,
-				memory_enabled: memoryEnabled
+				memory_enabled: memoryEnabled,
+				recall_enabled: recallEnabled
 			});
 		} catch (error: any) {
 			toast.error(`${error?.detail ?? error}`);
@@ -351,6 +426,82 @@
 							>
 								{#if memoryBusy === 'clear'}<Spinner className="size-3" />{/if}
 								{$i18n.t('Clear')}
+							</button>
+						{/if}
+					</div>
+				{/if}
+			</div>
+		{/if}
+
+		{#if isCharacterChat && recall?.available && recall.character_enabled}
+			<div>
+				<div class="mb-1 flex items-center justify-between text-gray-500">
+					<span>{$i18n.t('{{NAME}} remembers', { NAME: recall.char })}</span>
+					<Switch
+						bind:state={recallEnabled}
+						ariaLabel={$i18n.t('Remember this chat')}
+						on:change={async (event) => {
+							recallEnabled = event.detail;
+							await save();
+							loadRecall();
+						}}
+					/>
+				</div>
+				<div class="text-gray-400 mb-1">
+					{recallEnabled
+						? $i18n.t(
+								'What {{NAME}} knows about you from this and earlier chats; it is updated every few messages and kept only for you. One line per fact.',
+								{ NAME: recall.char }
+							)
+						: $i18n.t('{{NAME}} will not remember this chat later.', { NAME: recall.char })}
+				</div>
+				{#if recallEnabled}
+					{#if recall.entries.length || recallDraft}
+						<Textarea
+							className="w-full resize-vertical bg-transparent py-1 outline-hidden max-h-80 overflow-y-auto"
+							ariaLabel={$i18n.t('{{NAME}} remembers', { NAME: recall.char })}
+							placeholder={$i18n.t('Nothing yet')}
+							bind:value={recallDraft}
+							rows={4}
+							minSize={64}
+						/>
+					{:else}
+						<div class="text-gray-400 italic mb-1">{$i18n.t('Nothing yet')}</div>
+					{/if}
+					<div class="mt-1 flex flex-wrap items-center gap-1.5">
+						{#if recallDraft !== recallText(recall)}
+							<button
+								type="button"
+								class="px-2 py-0.5 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 flex items-center gap-1"
+								disabled={recallBusy !== null}
+								on:click={() => recallAction('save')}
+							>
+								{#if recallBusy === 'save'}<Spinner className="size-3" />{/if}
+								{$i18n.t('Save')}
+							</button>
+						{/if}
+						<button
+							type="button"
+							class="px-2 py-0.5 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 flex items-center gap-1"
+							disabled={recallBusy !== null}
+							title={$i18n.t('Add what happened in this chat to the memory now')}
+							on:click={() => recallAction('refresh')}
+						>
+							{#if recallBusy === 'refresh'}<Spinner className="size-3" />{/if}
+							{$i18n.t('Update now')}
+						</button>
+						{#if recall.entries.length}
+							<button
+								type="button"
+								class="px-2 py-0.5 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-850 flex items-center gap-1"
+								disabled={recallBusy !== null}
+								title={$i18n.t('Forget everything {{NAME}} remembers about you', {
+									NAME: recall.char
+								})}
+								on:click={() => recallAction('clear')}
+							>
+								{#if recallBusy === 'clear'}<Spinner className="size-3" />{/if}
+								{$i18n.t('Forget all')}
 							</button>
 						{/if}
 					</div>

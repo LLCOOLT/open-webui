@@ -135,6 +135,7 @@ export type ChatRoleplaySettings = {
 	authors_note: { text: string; depth: number; role: 'system' | 'user' | 'assistant' } | null;
 	persona_id?: string | null;
 	memory_enabled?: boolean;
+	recall_enabled?: boolean;
 };
 
 export type ChatMemory = {
@@ -166,6 +167,53 @@ export const refreshChatMemory = async (token: string, chatId: string): Promise<
 	(
 		await request(`/chats/${encodeURIComponent(chatId)}/roleplay/memory/refresh`, token, {
 			method: 'POST'
+		})
+	).json();
+
+// Character memory across chats: what the character remembers about the user.
+export type ChatRecallEntry = {
+	id: string;
+	content: string;
+	chat_id: string | null;
+	created_at: number;
+	updated_at: number;
+};
+
+export type ChatRecall = {
+	available: boolean;
+	enabled: boolean;
+	character_enabled: boolean;
+	model_id: string;
+	char: string;
+	entries: ChatRecallEntry[];
+	updated: boolean;
+	new_messages: number;
+};
+
+export const getChatRecall = async (token: string, chatId: string): Promise<ChatRecall> =>
+	(await request(`/chats/${encodeURIComponent(chatId)}/roleplay/recall`, token)).json();
+
+export const updateChatRecall = async (
+	token: string,
+	chatId: string,
+	entries: { id?: string | null; content: string }[]
+): Promise<ChatRecall> =>
+	(
+		await request(`/chats/${encodeURIComponent(chatId)}/roleplay/recall`, token, {
+			method: 'POST',
+			body: JSON.stringify({ entries })
+		})
+	).json();
+
+export const refreshChatRecall = async (
+	token: string,
+	chatId: string,
+	auto = false
+): Promise<ChatRecall> =>
+	(
+		await request(`/chats/${encodeURIComponent(chatId)}/roleplay/recall/refresh`, token, {
+			method: 'POST',
+			body: JSON.stringify({ auto })
 		})
 	).json();
 
