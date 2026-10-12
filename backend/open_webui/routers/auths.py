@@ -122,6 +122,7 @@ ADMIN_CONFIG_KEYS = {
     'AUTOMATION_MAX_COUNT': 'automations.max_count',
     'AUTOMATION_MIN_INTERVAL': 'automations.min_interval',
     'ENABLE_AUTOMATIONS': 'automations.enable',
+    'ENABLE_FINANCE': 'finance.enable',
     'ENABLE_CHANNELS': 'channels.enable',
     'CHANNEL_MODEL_RESPONSE_MODE': 'channels.model_response_mode',
     'ENABLE_CALENDAR': 'calendar.enable',
@@ -1227,6 +1228,7 @@ class AdminConfig(BaseModel):
     AUTOMATION_MAX_COUNT: int | str | None = None
     AUTOMATION_MIN_INTERVAL: int | str | None = None
     ENABLE_AUTOMATIONS: bool
+    ENABLE_FINANCE: bool = False
     ENABLE_CHANNELS: bool
     CHANNEL_MODEL_RESPONSE_MODE: str = 'thread'
     ENABLE_CALENDAR: bool

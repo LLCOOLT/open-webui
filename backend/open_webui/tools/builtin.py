@@ -4543,3 +4543,219 @@ async def delete_calendar_event(
     except Exception as e:
         log.exception(f'delete_calendar_event error: {e}')
         return JSONCodec.dumps({'error': str(e)})
+
+
+# =============================================================================
+# FINANCE TOOLS (read-only, phase 1)
+# =============================================================================
+# Market data and account reads only. Order placement arrives in a later phase
+# and will always require explicit user approval.
+
+
+async def _finance_call(name: str, fn, __user__: dict):
+    if not __user__:
+        return JSONCodec.dumps({'error': 'User context not available'})
+    from open_webui.utils.finance.base import FinanceProviderError
+
+    try:
+        result = await fn(__user__.get('id'))
+    except FinanceProviderError as e:
+        return JSONCodec.dumps({'error': str(e)})
+    except Exception as e:
+        log.exception(f'{name} error: {e}')
+        return JSONCodec.dumps({'error': 'Finance request failed'})
+
+    def dump(value):
+        if isinstance(value, list):
+            return [dump(v) for v in value]
+        return value.model_dump() if hasattr(value, 'model_dump') else value
+
+    return JSONCodec.dumps(dump(result), ensure_ascii=False)
+
+
+async def get_quote(
+    symbol: str,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Get the latest quote (bid, ask, last trade price) for a US stock or ETF.
+
+    :param symbol: Ticker symbol, e.g. "AAPL" or "SPY"
+    :return: JSON with symbol, bid, ask, bid_size, ask_size, last, timestamp
+    """
+    from open_webui.utils.finance import service
+    from open_webui.utils.finance.base import normalize_symbol
+
+    async def run(user_id):
+        broker = await service.get_broker(user_id)
+        return await broker.quote(normalize_symbol(symbol))
+
+    return await _finance_call('get_quote', run, __user__)
+
+
+async def get_bars(
+    symbol: str,
+    timeframe: str = '1Day',
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 100,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Get historical OHLCV price bars for a US stock or ETF (split/dividend adjusted).
+
+    :param symbol: Ticker symbol, e.g. "QQQ"
+    :param timeframe: One of "1Min", "5Min", "15Min", "1Hour", "1Day", "1Week" (default "1Day")
+    :param start: Start date "YYYY-MM-DD" (optional; defaults to a lookback suited to the timeframe)
+    :param end: End date "YYYY-MM-DD" (optional; defaults to now)
+    :param limit: Return at most this many of the most recent bars (default 100, max 1000)
+    :return: JSON with symbol, timeframe, count and bars [{t: unix seconds, o, h, l, c, v, vw}]
+    """
+    from open_webui.utils.finance import service
+
+    async def run(user_id):
+        broker = await service.get_broker(user_id)
+        bars = await service.get_bars(broker, symbol, timeframe, start, end, max(1, min(limit or 100, 1000)))
+        return {'symbol': symbol.upper(), 'timeframe': timeframe, 'count': len(bars), 'bars': bars}
+
+    return await _finance_call('get_bars', run, __user__)
+
+
+async def search_symbols(
+    query: str,
+    limit: int = 10,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Search tradable US stocks and ETFs by ticker or company name.
+
+    :param query: Ticker prefix or part of the company name, e.g. "nvid" or "S&P 500"
+    :param limit: Maximum results (default 10)
+    :return: JSON list of {symbol, name, exchange, asset_class, tradable}
+    """
+    from open_webui.utils.finance import service
+
+    async def run(user_id):
+        broker = await service.get_broker(user_id)
+        return await broker.search(query, limit=max(1, min(limit, 50)))
+
+    return await _finance_call('search_symbols', run, __user__)
+
+
+async def get_market_news(
+    symbols: Optional[str] = None,
+    limit: int = 10,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Get recent market news headlines, optionally filtered to specific tickers.
+
+    :param symbols: Comma-separated tickers, e.g. "AAPL,MSFT" (optional; omit for general market news)
+    :param limit: Maximum articles (default 10, max 50)
+    :return: JSON list of {headline, summary, source, url, symbols, created_at}
+    """
+    from open_webui.utils.finance import service
+    from open_webui.utils.finance.base import normalize_symbol
+
+    async def run(user_id):
+        broker = await service.get_broker(user_id)
+        symbol_list = [normalize_symbol(s) for s in (symbols or '').split(',') if s.strip()]
+        return await broker.news(symbol_list, limit=limit)
+
+    return await _finance_call('get_market_news', run, __user__)
+
+
+async def get_fundamentals(
+    symbol: str,
+    years: int = 4,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Get annual fundamentals from SEC 10-K filings: revenue, gross profit, operating income,
+    net income, diluted EPS, assets, liabilities, equity, cash, operating cash flow, shares outstanding.
+
+    :param symbol: Ticker symbol of a US-listed company
+    :param years: Number of most recent fiscal years (default 4, max 10)
+    :return: JSON with company, cik and metrics {name: [{period_end, fiscal_year, value}]}
+    """
+    from open_webui.utils.finance import service
+    from open_webui.utils.finance.base import normalize_symbol
+
+    async def run(user_id):
+        edgar = await service.get_edgar(user_id)
+        return await edgar.fundamentals(normalize_symbol(symbol), years=years)
+
+    return await _finance_call('get_fundamentals', run, __user__)
+
+
+async def get_filings(
+    symbol: str,
+    forms: Optional[str] = None,
+    limit: int = 10,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    List recent SEC filings for a US-listed company with links to the documents.
+
+    :param symbol: Ticker symbol
+    :param forms: Comma-separated form types to include, e.g. "10-K,10-Q,8-K" (optional; all forms if omitted)
+    :param limit: Maximum filings (default 10)
+    :return: JSON list of {form, filing_date, report_date, description, url}
+    """
+    from open_webui.utils.finance import service
+    from open_webui.utils.finance.base import normalize_symbol
+
+    async def run(user_id):
+        edgar = await service.get_edgar(user_id)
+        form_list = [f.strip() for f in (forms or '').split(',') if f.strip()] or None
+        return await edgar.filings(normalize_symbol(symbol), forms=form_list, limit=limit)
+
+    return await _finance_call('get_filings', run, __user__)
+
+
+async def get_portfolio(
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Get the user's brokerage account summary (equity, cash, buying power, paper or live) and current positions.
+
+    :return: JSON with account {status, equity, cash, buying_power, portfolio_value, currency, is_paper} and positions list
+    """
+    from open_webui.utils.finance import service
+
+    async def run(user_id):
+        broker = await service.get_broker(user_id)
+        account = await broker.account()
+        positions = await broker.positions()
+        return {'account': account.model_dump(), 'positions': [p.model_dump() for p in positions]}
+
+    return await _finance_call('get_portfolio', run, __user__)
+
+
+async def get_orders(
+    status: str = 'open',
+    limit: int = 20,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    List the user's brokerage orders.
+
+    :param status: "open", "closed" or "all" (default "open")
+    :param limit: Maximum orders (default 20)
+    :return: JSON list of {id, symbol, side, type, qty, filled_qty, limit_price, stop_price, status, submitted_at, filled_avg_price}
+    """
+    from open_webui.utils.finance import service
+
+    async def run(user_id):
+        broker = await service.get_broker(user_id)
+        return await broker.orders(status=status, limit=limit)
+
+    return await _finance_call('get_orders', run, __user__)

@@ -151,6 +151,7 @@ from open_webui.routers import (
     audio,
     auths,
     automations,
+    finance,
     calendar,
     channels,
     chats,
@@ -880,6 +881,7 @@ if ENABLE_ADMIN_ANALYTICS:
 app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
 app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
 app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
+app.include_router(finance.router, prefix='/api/v1/finance', tags=['finance'])
 app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
 
 # SCIM 2.0 API for identity management
@@ -2268,6 +2270,7 @@ async def get_app_config(request: Request):
         'channels.enable',
         'calendar.enable',
         'automations.enable',
+        'finance.enable',
         'notes.enable',
         'chat.context_compaction.enable',
         'chat.tool_permissions.enable',
@@ -2356,6 +2359,7 @@ async def get_app_config(request: Request):
                     'enable_channels': config.get('channels.enable'),
                     'enable_calendar': config.get('calendar.enable'),
                     'enable_automations': config.get('automations.enable'),
+                    'enable_finance': config.get('finance.enable'),
                     'enable_notes': config.get('notes.enable'),
                     'enable_context_compaction': config.get('chat.context_compaction.enable'),
                     'enable_tool_permissions': config.get('chat.tool_permissions.enable'),

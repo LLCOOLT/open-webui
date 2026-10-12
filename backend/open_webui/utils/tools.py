@@ -45,6 +45,14 @@ from open_webui.models.groups import Groups
 from open_webui.models.tools import Tools
 from open_webui.models.users import UserModel
 from open_webui.tools.builtin import (
+    get_bars,
+    get_filings,
+    get_fundamentals,
+    get_market_news,
+    get_orders,
+    get_portfolio,
+    get_quote,
+    search_symbols,
     add_memory,
     ask_user,
     calculate_timestamp,
@@ -551,6 +559,7 @@ async def get_builtin_tools(
         'channels.enable',
         'automations.enable',
         'calendar.enable',
+        'finance.enable',
         'ui.enable_user_webhooks',
         'subagents.enable',
         'subagents.background_enabled',
@@ -754,6 +763,21 @@ async def get_builtin_tools(
     if is_builtin_tool_enabled('calendar') and config.get('calendar.enable') and await has_user_permission('calendar'):
         builtin_functions.extend(
             [search_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event]
+        )
+
+    # Finance tools - read-only market data and account access
+    if is_builtin_tool_enabled('finance') and config.get('finance.enable') and await has_user_permission('finance'):
+        builtin_functions.extend(
+            [
+                get_quote,
+                get_bars,
+                search_symbols,
+                get_market_news,
+                get_fundamentals,
+                get_filings,
+                get_portfolio,
+                get_orders,
+            ]
         )
 
     if (
