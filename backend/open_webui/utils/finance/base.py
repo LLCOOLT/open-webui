@@ -192,7 +192,13 @@ def parse_date_input(value: Optional[str]) -> Optional[datetime]:
 
 def normalize_symbol(symbol: str) -> str:
     symbol = (symbol or '').strip().upper()
-    if not symbol or len(symbol) > 21 or not all(ch.isalnum() or ch in '.-/' for ch in symbol):
+    if (
+        not symbol
+        or len(symbol) > 21
+        or not symbol[0].isalnum()
+        or '..' in symbol
+        or not all(ch.isalnum() or ch in '.-/' for ch in symbol)
+    ):
         raise FinanceProviderError(f'Invalid symbol: {symbol!r}', status_code=400)
     return symbol
 
