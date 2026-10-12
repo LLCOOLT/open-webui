@@ -266,7 +266,9 @@ async def character_id(api, assist_app):
 
 
 def image_config(**overrides):
-    return SimpleNamespace(**{'ENABLE_IMAGE_GENERATION': True, 'ENABLE_IMAGE_EDIT': False, 'USER_PERMISSIONS': {}, **overrides})
+    return SimpleNamespace(
+        **{'ENABLE_IMAGE_GENERATION': True, 'ENABLE_IMAGE_EDIT': False, 'USER_PERMISSIONS': {}, **overrides}
+    )
 
 
 async def test_impersonate_endpoint(api, character_id, assist_app, people, monkeypatch):
@@ -348,6 +350,10 @@ async def test_generate_expression_endpoint(api, character_id, assist_app, peopl
 
     async def fake_generate(request, form_data, metadata=None, user=None):
         prompts.append(form_data.prompt)
+        # The editor saves the character while the image is being drawn; neither change is lost.
+        model = await Models.get_model_by_id(character_id)
+        model.meta.character.description = 'Saved meanwhile.'
+        await models_router._save_character_meta(model, None)
         uploaded = await models_router._upload_character_image(request, png((0, 200, 0)), 'gen.png', user, None)
         return [{'id': uploaded.id}]
 
@@ -365,6 +371,9 @@ async def test_generate_expression_endpoint(api, character_id, assist_app, peopl
     assert response.json()['expressions'] == ['joy']
     assert 'clear joy expression' in prompts[0] and 'Art style: anime.' in prompts[0]
     assert prompts[1] == 'an elf, smiling, upper body'
+    model = await Models.get_model_by_id(character_id)
+    assert model.meta.character.description == 'Saved meanwhile.'
+    assert list(model.meta.character.expressions) == ['joy']
     response = await api.get(f'/api/v1/models/model/character/expression?id={character_id}&name=joy')
     assert response.status_code == 200 and response.headers['content-type'] == 'image/webp'
 
@@ -417,8 +426,10 @@ async def test_lore_suggestion_endpoint(api, character_id, people, monkeypatch):
 
     async def fake_task(request, user, model_id, prompt, task, direct=False):
         prompts.append(prompt)
-        return '{"entries": [{"name": "Bram", "keys": ["Bram"], "content": "Bram waits at the mill."},' \
+        return (
+            '{"entries": [{"name": "Bram", "keys": ["Bram"], "content": "Bram waits at the mill."},'
             '{"name": "Mill", "keys": ["old mill"], "content": "dup"}]}'
+        )
 
     monkeypatch.setattr(chats_router, 'run_task_prompt', fake_task)
     response = await api.post(f'/api/v1/chats/{chat_id}/roleplay/lore/suggest')

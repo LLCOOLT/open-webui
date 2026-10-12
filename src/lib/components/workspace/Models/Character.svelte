@@ -41,7 +41,10 @@
 	// The server keeps the image files; this copy only lists the names for display.
 	const setExpressionNames = (names: string[]) => {
 		const current = character.expressions ?? {};
-		character.expressions = Object.fromEntries(names.map((name) => [name, current[name] ?? 'new']));
+		setField(
+			'expressions',
+			Object.fromEntries(names.map((name) => [name, current[name] ?? 'new']))
+		);
 		expressionVersion += 1;
 	};
 
@@ -141,23 +144,40 @@
 		creator_notes: ''
 	});
 
+	// Fields edited from inside {#each} blocks are set by reassigning `character`: a `bind:` on
+	// `character[field.key]` (or a mutation like `character.x.y = ...`) makes Svelte's legacy
+	// compiler emit invalidation code that references the loop variable outside its scope.
+	const setField = (key: string, value: unknown) => (character = { ...character, [key]: value });
+	const setOverride = (key: string, value: string) =>
+		setField('prompt_overrides', { ...character.prompt_overrides, [key]: value });
+
 	// Reply cleanup (see backend utils/roleplay/cleanup.py).
 	function defaultCleanup() {
 		return { stop_at_user: true, trim_incomplete: false, rules: [] };
 	}
 
-	const addRule = () => {
-		character.reply_cleanup.rules = [
-			...character.reply_cleanup.rules,
-			{ find: '', replace: '', regex: false, enabled: true }
-		];
-	};
+	const setCleanup = (patch: Record<string, unknown>) =>
+		setField('reply_cleanup', { ...character.reply_cleanup, ...patch });
 
-	const removeRule = (index: number) => {
-		character.reply_cleanup.rules = character.reply_cleanup.rules.filter(
-			(_: unknown, i: number) => i !== index
-		);
-	};
+	const setRule = (index: number, patch: Record<string, unknown>) =>
+		setCleanup({
+			rules: character.reply_cleanup.rules.map((rule: any, i: number) =>
+				i === index ? { ...rule, ...patch } : rule
+			)
+		});
+
+	const addRule = () =>
+		setCleanup({
+			rules: [
+				...character.reply_cleanup.rules,
+				{ find: '', replace: '', regex: false, enabled: true }
+			]
+		});
+
+	const removeRule = (index: number) =>
+		setCleanup({
+			rules: character.reply_cleanup.rules.filter((_: unknown, i: number) => i !== index)
+		});
 
 	// Generating expression images with the configured image generator.
 	const DEFAULT_EXPRESSIONS = [
@@ -374,7 +394,8 @@
 						ariaLabel={field.label}
 						rows={2}
 						minSize={48}
-						bind:value={character[field.key]}
+						value={character[field.key]}
+						onInput={(event) => setField(field.key, (event.target as HTMLTextAreaElement).value)}
 					/>
 				</div>
 			{/each}
@@ -459,7 +480,8 @@
 							aria-label={$i18n.t('How {{FIELD}} combines with the default', {
 								FIELD: field.label
 							})}
-							bind:value={character.prompt_overrides[field.override]}
+							value={character.prompt_overrides[field.override]}
+							on:change={(event) => setOverride(field.override, event.currentTarget.value)}
 						>
 							<option value="replace">{$i18n.t('Replaces default')}</option>
 							<option value="supplement">{$i18n.t('Adds to default')}</option>
@@ -471,7 +493,8 @@
 						ariaLabel={field.label}
 						rows={2}
 						minSize={48}
-						bind:value={character[field.key]}
+						value={character[field.key]}
+						onInput={(event) => setField(field.key, (event.target as HTMLTextAreaElement).value)}
 					/>
 				</div>
 			{/each}
@@ -527,7 +550,10 @@
 								)}
 							</span>
 						</span>
-						<Switch bind:state={character.reply_cleanup.stop_at_user} />
+						<Switch
+							state={character.reply_cleanup.stop_at_user}
+							on:change={(event) => setCleanup({ stop_at_user: event.detail })}
+						/>
 					</label>
 					<label class="flex items-center justify-between gap-2">
 						<span>
@@ -538,7 +564,10 @@
 								)}
 							</span>
 						</span>
-						<Switch bind:state={character.reply_cleanup.trim_incomplete} />
+						<Switch
+							state={character.reply_cleanup.trim_incomplete}
+							on:change={(event) => setCleanup({ trim_incomplete: event.detail })}
+						/>
 					</label>
 
 					{#each character.reply_cleanup.rules as rule, index}
@@ -546,22 +575,29 @@
 							<input
 								type="checkbox"
 								aria-label={$i18n.t('Rule enabled')}
-								bind:checked={rule.enabled}
+								checked={rule.enabled}
+								on:change={(event) => setRule(index, { enabled: event.currentTarget.checked })}
 							/>
 							<input
 								class="{inputClass} flex-1 min-w-0 font-mono"
 								placeholder={rule.regex ? '/pattern/gi' : $i18n.t('Find')}
 								aria-label={$i18n.t('Find')}
-								bind:value={rule.find}
+								value={rule.find}
+								on:input={(event) => setRule(index, { find: event.currentTarget.value })}
 							/>
 							<input
 								class="{inputClass} flex-1 min-w-0 font-mono"
 								placeholder={rule.regex ? $i18n.t('Replace ($1 for groups)') : $i18n.t('Replace')}
 								aria-label={$i18n.t('Replace')}
-								bind:value={rule.replace}
+								value={rule.replace}
+								on:input={(event) => setRule(index, { replace: event.currentTarget.value })}
 							/>
 							<label class="flex items-center gap-1 text-gray-500 shrink-0">
-								<input type="checkbox" bind:checked={rule.regex} />
+								<input
+									type="checkbox"
+									checked={rule.regex}
+									on:change={(event) => setRule(index, { regex: event.currentTarget.checked })}
+								/>
 								{$i18n.t('Regex')}
 							</label>
 							<button

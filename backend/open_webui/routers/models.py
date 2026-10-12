@@ -1384,6 +1384,35 @@ async def _save_character_meta(model: ModelModel, db: AsyncSession) -> None:
         raise HTTPException(status_code=500, detail='Could not update the character.')
 
 
+async def _write_expressions(model_id: str, changes: dict[str, str | None], db: AsyncSession):
+    """Apply ``{name: file id}`` (``None`` removes) to the character as stored now and save it.
+
+    Image work is slow, and the editor may save the character meanwhile; reading the model again
+    right before writing keeps both changes. Returns ``(names, replaced file ids, names not added)``.
+    """
+    # A new session: the request's own session would return the copy it loaded earlier.
+    model = await Models.get_model_by_id(model_id)
+    if model is None or model.meta.character is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    expressions = model.meta.character.expressions
+    replaced: list[str] = []
+    rejected: list[str] = []
+    for name, file_id in changes.items():
+        if file_id is None:
+            if name in expressions:
+                replaced.append(expressions.pop(name))
+            continue
+        if name in expressions:
+            replaced.append(expressions[name])
+        elif len(expressions) >= MAX_EXPRESSIONS:
+            rejected.append(name)
+            continue
+        expressions[name] = file_id
+    if changes and len(rejected) < len(changes):
+        await _save_character_meta(model, db)
+    return sorted(expressions), replaced, rejected
+
+
 def _expression_files(name: str, data: bytes) -> list[tuple[str, bytes]]:
     """``(filename, bytes)`` for an uploaded image, or every image in an uploaded sprite-pack zip."""
     if data.startswith(ZIP_SIGNATURE):
@@ -1410,10 +1439,9 @@ async def upload_character_expressions(
     "joy"); a zip adds every image in it, as SillyTavern sprite packs are shared."""
     await _require_character_cards_enabled()
     model = await _get_character_model(id, user, db, 'write')
-    character = model.meta.character
     uploads: list = []
     skipped: list[str] = []
-    replaced: list[str] = []
+    changes: dict[str, str] = {}
     try:
         for upload in files:
             data = await upload.read(CHARACTER_CARD_MAX_BYTES + 1)
@@ -1424,22 +1452,28 @@ async def upload_character_expressions(
                 if not sniff_image_type(image) or not name:
                     skipped.append(filename)
                     continue
-                if name not in character.expressions and len(character.expressions) >= MAX_EXPRESSIONS:
+                if (
+                    name not in model.meta.character.expressions
+                    and name not in changes
+                    and len(model.meta.character.expressions) + len(changes) >= MAX_EXPRESSIONS
+                ):
                     skipped.append(filename)
                     continue
                 stored = await _store_expression(request, name, image, user, db, uploads)
                 if stored is None:
                     skipped.append(filename)
                     continue
-                if stored[0] in character.expressions:
-                    replaced.append(character.expressions[stored[0]])
-                character.expressions[stored[0]] = stored[1]
-        await _save_character_meta(model, db)
+                if stored[0] in changes:
+                    # The same name twice in one upload: the later image wins.
+                    await _discard_file_ids([changes[stored[0]]], db)
+                changes[stored[0]] = stored[1]
+        names, replaced, rejected = await _write_expressions(model.id, changes, db)
     except Exception:
         await _discard_uploads(uploads, db)
         raise
-    await _discard_file_ids(replaced, db)
-    return CharacterExpressionsResponse(expressions=sorted(character.expressions), skipped=skipped)
+    await _discard_file_ids([*replaced, *(changes[name] for name in rejected)], db)
+    skipped += rejected
+    return CharacterExpressionsResponse(expressions=names, skipped=skipped)
 
 
 @router.delete('/model/character/expression', response_model=CharacterExpressionsResponse)
@@ -1451,12 +1485,9 @@ async def delete_character_expression(
 ):
     await _require_character_cards_enabled()
     model = await _get_character_model(id, user, db, 'write')
-    character = model.meta.character
-    file_id = character.expressions.pop(clean_expression_name(name), None)
-    if file_id:
-        await _save_character_meta(model, db)
-        await _discard_file_ids([file_id], db)
-    return CharacterExpressionsResponse(expressions=sorted(character.expressions))
+    names, replaced, _ = await _write_expressions(model.id, {clean_expression_name(name): None}, db)
+    await _discard_file_ids(replaced, db)
+    return CharacterExpressionsResponse(expressions=names)
 
 
 class ExpressionClassifyForm(BaseModel):
@@ -1573,18 +1604,17 @@ async def generate_character_expression(
         stored = await _store_expression(request, name, image, user, db, uploads)
         if stored is None:
             raise HTTPException(status_code=502, detail='The image generator returned an unreadable image.')
-        previous = character.expressions.get(stored[0])
-        character.expressions[stored[0]] = stored[1]
-        await _save_character_meta(model, db)
+        names, replaced, rejected = await _write_expressions(model.id, {stored[0]: stored[1]}, db)
+        if rejected:
+            raise HTTPException(status_code=400, detail='This character has the most expressions allowed.')
     except Exception:
         await _discard_uploads(uploads, db)
         raise
     finally:
         # The generator's own copies; the expression keeps a normalized one.
         await _discard_file_ids([image.get('id') for image in images if image.get('id')], db)
-    if previous:
-        await _discard_file_ids([previous], db)
-    return CharacterExpressionsResponse(expressions=sorted(character.expressions))
+    await _discard_file_ids(replaced, db)
+    return CharacterExpressionsResponse(expressions=names)
 
 
 async def _discard_file_ids(file_ids: list[str], db: AsyncSession) -> None:
