@@ -21,6 +21,7 @@ from open_webui.models.lorebooks import Lorebooks
 from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.misc import get_content_from_message, get_last_user_message, get_system_message
 from open_webui.utils.roleplay.character import CharacterMeta, DepthPrompt
+from open_webui.utils.roleplay.cleanup import add_stop_sequences, clean_output
 from open_webui.utils.roleplay.lorebook import Activation, activate
 from open_webui.utils.roleplay.memory import memory_overrides
 from open_webui.utils.roleplay.persona import persona_description, resolve_persona
@@ -68,6 +69,20 @@ def roleplay_memory_settings(request) -> dict | None:
     """Compaction overrides for this request's character chat, if any."""
     state = getattr(getattr(request, 'state', None), 'roleplay_state', None)
     return state.memory if state is not None else None
+
+
+def clean_character_reply(request, output: list) -> bool:
+    """Apply the character's reply cleanup to a finished reply's output, in place. True if it changed."""
+    state = getattr(getattr(request, 'state', None), 'roleplay_state', None)
+    if state is None or state.character is None or state.ooc or not state.character.reply_cleanup.active():
+        return False
+    before = repr(output)
+    try:
+        clean_output(output, state.character.reply_cleanup, state.ctx.char, state.ctx.user)
+    except Exception:
+        log.exception('Reply cleanup failed')
+        return False
+    return repr(output) != before
 
 
 def character_system_prompt_applied(request, model_id: str | None) -> bool:
@@ -169,6 +184,8 @@ async def apply_character_system(request, form_data: dict, metadata: dict, user,
         else:
             state.lore = activate(books, messages) if books else None
             form_data['messages'] = apply_character_system_prompt(messages, character, state.ctx, state.lore)
+            if character.reply_cleanup.stop_at_user:
+                add_stop_sequences(form_data, model, state.ctx.user)
         request.state.roleplay_model_id = model.get('id')
         state.memory = await memory_overrides(state.ctx.char, state.ctx.user, chat_meta)
 

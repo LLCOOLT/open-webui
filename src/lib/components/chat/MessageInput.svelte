@@ -41,7 +41,8 @@
 		showFileNavDir,
 		selectedTerminalId,
 		TTSWorker,
-		temporaryChatEnabled
+		temporaryChatEnabled,
+		chatPersonaId
 	} from '$lib/stores';
 
 	import {
@@ -93,6 +94,9 @@
 	import XMark from '../icons/XMark.svelte';
 	import GlobeAlt from '../icons/GlobeAlt.svelte';
 	import Photo from '../icons/Photo.svelte';
+	import PencilSquare from '../icons/PencilSquare.svelte';
+	import { impersonateUser } from '$lib/apis/lorebooks';
+	import { getOutputText } from './Messages/structuredOutput';
 	import Wrench from '../icons/Wrench.svelte';
 	import Cube from '../icons/Cube.svelte';
 	import Sparkles from '../icons/Sparkles.svelte';
@@ -416,6 +420,38 @@
 
 	export const focus = (options: FocusOptions = {}) => {
 		chatInputElement?.focus(options);
+	};
+
+	// Impersonate (roleplay): the model writes the user's next message, as their persona, into the
+	// input for them to edit and send. Text already typed is used as the idea to build on.
+	let impersonating = false;
+	const impersonate = async () => {
+		if (impersonating) return;
+		impersonating = true;
+		try {
+			const messages = (history?.currentId ? createMessagesList(history, history.currentId) : [])
+				.slice(-60)
+				.map((message) => ({
+					role: message.role,
+					content:
+						message.role === 'assistant'
+							? getOutputText(message.output) || message.content
+							: message.content
+				}));
+			const { content } = await impersonateUser(localStorage.token, {
+				model_id: selectedModels[0],
+				messages,
+				chat_id: chatId || null,
+				persona_id: $chatPersonaId,
+				draft: prompt
+			});
+			chatInputElement?.setText(content);
+			focus();
+		} catch (error: any) {
+			toast.error(error?.detail ?? `${error}`);
+		} finally {
+			impersonating = false;
+		}
 	};
 
 	export const setText = async (text?: string, cb?: (text: string) => void) => {
@@ -2536,6 +2572,26 @@
 															: 'bg-transparent text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800'}"
 													>
 														OOC
+													</button>
+												</Tooltip>
+												<Tooltip
+													content={prompt.trim()
+														? $i18n.t('Impersonate: turn what you typed into your next message')
+														: $i18n.t('Impersonate: write your next message for you')}
+													placement="top"
+												>
+													<button
+														aria-label={$i18n.t('Impersonate')}
+														disabled={impersonating}
+														on:click|preventDefault={impersonate}
+														type="button"
+														class="p-[0.375rem] flex items-center rounded-full transition-colors duration-300 focus:outline-hidden bg-transparent text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:cursor-wait"
+													>
+														{#if impersonating}
+															<Spinner className="size-4" />
+														{:else}
+															<PencilSquare className="size-4" strokeWidth="1.75" />
+														{/if}
 													</button>
 												</Tooltip>
 											{/if}

@@ -711,3 +711,19 @@ export const classifyCharacterExpression = (
 	text: string
 ): Promise<{ name: string | null }> =>
 	postJson(token, '/models/model/character/expression/classify', { model_id: modelId, text });
+
+// Draws one expression image (from the avatar when image editing is set up).
+export const generateCharacterExpression = (
+	token: string,
+	modelId: string,
+	name: string,
+	style = ''
+): Promise<{ expressions: string[] }> =>
+	postJson(
+		token,
+		`/models/model/character/expressions/generate?id=${encodeURIComponent(modelId)}`,
+		{
+			name,
+			style
+		}
+	);

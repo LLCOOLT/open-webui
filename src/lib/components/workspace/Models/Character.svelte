@@ -6,8 +6,10 @@
 		characterExpressionUrl,
 		convertSystemPromptToCharacter,
 		deleteCharacterExpression,
+		generateCharacterExpression,
 		uploadCharacterExpressions
 	} from '$lib/apis/models';
+	import { config, user } from '$lib/stores';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 
 	import Switch from '$lib/components/common/Switch.svelte';
@@ -134,9 +136,86 @@
 		prompt_overrides: { system_prompt: 'replace', post_history: 'replace' },
 		depth_prompt: { text: '', depth: 4, role: 'system' },
 		example_mode: 'system',
+		reply_cleanup: defaultCleanup(),
 		creator: '',
 		creator_notes: ''
 	});
+
+	// Reply cleanup (see backend utils/roleplay/cleanup.py).
+	function defaultCleanup() {
+		return { stop_at_user: true, trim_incomplete: false, rules: [] };
+	}
+
+	const addRule = () => {
+		character.reply_cleanup.rules = [
+			...character.reply_cleanup.rules,
+			{ find: '', replace: '', regex: false, enabled: true }
+		];
+	};
+
+	const removeRule = (index: number) => {
+		character.reply_cleanup.rules = character.reply_cleanup.rules.filter(
+			(_: unknown, i: number) => i !== index
+		);
+	};
+
+	// Generating expression images with the configured image generator.
+	const DEFAULT_EXPRESSIONS = [
+		'neutral',
+		'joy',
+		'sadness',
+		'anger',
+		'surprise',
+		'fear',
+		'embarrassment'
+	];
+	$: canGenerateImages =
+		!!$config?.features?.enable_image_generation &&
+		($user?.role === 'admin' || !!$user?.permissions?.features?.image_generation);
+	let showGenerate = false;
+	let generateNames = '';
+	let generateStyle = '';
+	let generating: { name: string; index: number; total: number } | null = null;
+
+	const openGenerate = () => {
+		const missing = DEFAULT_EXPRESSIONS.filter((name) => !expressionNames.includes(name));
+		generateNames = (missing.length ? missing : DEFAULT_EXPRESSIONS).join(', ');
+		showGenerate = true;
+	};
+
+	const generateExpressions = async () => {
+		const names = [
+			...new Set(
+				generateNames
+					.split(',')
+					.map((name) => name.trim().toLowerCase())
+					.filter(Boolean)
+			)
+		];
+		if (!modelId || !names.length) return;
+		let made = 0;
+		for (const [index, name] of names.entries()) {
+			generating = { name, index: index + 1, total: names.length };
+			try {
+				const result = await generateCharacterExpression(
+					localStorage.token,
+					modelId,
+					name,
+					generateStyle
+				);
+				setExpressionNames(result.expressions);
+				made += 1;
+			} catch (error: any) {
+				toast.error(`${name}: ${error?.detail ?? error}`);
+				if (made === 0) break; // likely not set up; do not repeat the same error for each name
+			}
+		}
+		generating = null;
+		if (made) {
+			toast.success($i18n.t('Generated {{COUNT}} expression images', { COUNT: made }));
+			showGenerate = false;
+		}
+	};
 
 	let enabled = character !== null && character !== undefined;
 	$: setEnabled(enabled);
@@ -159,7 +238,8 @@
 		},
 		depth_prompt: value.depth_prompt ?? { text: '', depth: 4, role: 'system' },
 		alternate_greetings: value.alternate_greetings ?? [],
-		example_mode: value.example_mode ?? 'system'
+		example_mode: value.example_mode ?? 'system',
+		reply_cleanup: { ...defaultCleanup(), ...(value.reply_cleanup ?? {}) }
 	});
 
 	$: if (
@@ -167,7 +247,8 @@
 		(!character.prompt_overrides ||
 			!character.depth_prompt ||
 			!character.alternate_greetings ||
-			!character.example_mode)
+			!character.example_mode ||
+			!character.reply_cleanup?.rules)
 	) {
 		character = withDefaults(character);
 	}
@@ -429,6 +510,89 @@
 				/>
 			</div>
 
+			<div>
+				<div class={labelClass}>{$i18n.t('Reply Cleanup')}</div>
+				<div class="flex flex-col gap-1.5 text-xs">
+					<label class="flex items-center justify-between gap-2">
+						<span>
+							{$i18n.t("Stop replies that start writing the user's lines")}
+							<span class="block text-[0.6875rem] text-gray-400">
+								{$i18n.t(
+									'Cuts the reply at a line like "{{USER}}: …" and drops a leading "{{CHAR}}:".',
+									{
+										USER: '{{user}}',
+										CHAR: '{{char}}',
+										interpolation: { escapeValue: false }
+									}
+								)}
+							</span>
+						</span>
+						<Switch bind:state={character.reply_cleanup.stop_at_user} />
+					</label>
+					<label class="flex items-center justify-between gap-2">
+						<span>
+							{$i18n.t('Trim unfinished sentences')}
+							<span class="block text-[0.6875rem] text-gray-400">
+								{$i18n.t(
+									'Removes a last sentence that was cut off, for example by the token limit.'
+								)}
+							</span>
+						</span>
+						<Switch bind:state={character.reply_cleanup.trim_incomplete} />
+					</label>
+
+					{#each character.reply_cleanup.rules as rule, index}
+						<div class="flex items-center gap-1.5">
+							<input
+								type="checkbox"
+								aria-label={$i18n.t('Rule enabled')}
+								bind:checked={rule.enabled}
+							/>
+							<input
+								class="{inputClass} flex-1 min-w-0 font-mono"
+								placeholder={rule.regex ? '/pattern/gi' : $i18n.t('Find')}
+								aria-label={$i18n.t('Find')}
+								bind:value={rule.find}
+							/>
+							<input
+								class="{inputClass} flex-1 min-w-0 font-mono"
+								placeholder={rule.regex ? $i18n.t('Replace ($1 for groups)') : $i18n.t('Replace')}
+								aria-label={$i18n.t('Replace')}
+								bind:value={rule.replace}
+							/>
+							<label class="flex items-center gap-1 text-gray-500 shrink-0">
+								<input type="checkbox" bind:checked={rule.regex} />
+								{$i18n.t('Regex')}
+							</label>
+							<button
+								type="button"
+								class="p-0.5 rounded-full text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-850"
+								aria-label={$i18n.t('Remove rule')}
+								on:click={() => removeRule(index)}
+							>
+								<XMark className="size-3" />
+							</button>
+						</div>
+					{/each}
+					<div class="flex items-center justify-between gap-2">
+						<span class="text-[0.6875rem] text-gray-400">
+							{$i18n.t(
+								'Find-and-replace rules run on every finished reply, in order. {{CHAR}} and {{USER}} work in both fields.',
+								{ CHAR: '{{char}}', USER: '{{user}}', interpolation: { escapeValue: false } }
+							)}
+						</span>
+						<button
+							type="button"
+							class="px-2 py-0.5 text-xs rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-850 flex items-center gap-1 shrink-0"
+							on:click={addRule}
+						>
+							<Plus className="size-3" />
+							{$i18n.t('Add rule')}
+						</button>
+					</div>
+				</div>
+			</div>
+
 			<div class="flex gap-3">
 				<div class="flex-1">
 					<div class={labelClass}>{$i18n.t('Creator')}</div>
@@ -475,8 +639,61 @@
 								/>{/if}
 							{$i18n.t('Add images')}
 						</button>
+						{#if canGenerateImages}
+							<button
+								type="button"
+								class="px-2 py-0.5 text-xs rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-850 flex items-center gap-1 disabled:opacity-50"
+								disabled={!!generating}
+								on:click={() => (showGenerate ? (showGenerate = false) : openGenerate())}
+							>
+								{$i18n.t('Generate')}
+							</button>
+						{/if}
 					{/if}
 				</div>
+				{#if showGenerate && modelId}
+					<div
+						class="mt-1 p-2 rounded-lg border border-gray-100 dark:border-gray-850 flex flex-col gap-1.5 text-xs"
+					>
+						<label>
+							<span class="text-gray-500">{$i18n.t('Expressions to draw (comma-separated)')}</span>
+							<input class={inputClass} bind:value={generateNames} disabled={!!generating} />
+						</label>
+						<label>
+							<span class="text-gray-500">{$i18n.t('Art style (optional)')}</span>
+							<input
+								class={inputClass}
+								placeholder={$i18n.t('e.g. anime, soft watercolor')}
+								bind:value={generateStyle}
+								disabled={!!generating}
+							/>
+						</label>
+						<div class="flex items-center justify-between gap-2">
+							<span class="text-[0.6875rem] text-gray-400">
+								{$i18n.t(
+									'With image editing set up, each image redraws the avatar with the expression, so the look stays the same; otherwise it is drawn from the description. Same names replace existing images.'
+								)}
+							</span>
+							<button
+								type="button"
+								class="px-3 py-1 rounded-lg bg-black text-white dark:bg-white dark:text-black flex items-center gap-1.5 shrink-0 disabled:opacity-60"
+								disabled={!!generating || !generateNames.trim()}
+								on:click={generateExpressions}
+							>
+								{#if generating}
+									<Spinner className="size-3" />
+									{$i18n.t('Drawing {{NAME}} ({{INDEX}}/{{TOTAL}})', {
+										NAME: generating.name,
+										INDEX: generating.index,
+										TOTAL: generating.total
+									})}
+								{:else}
+									{$i18n.t('Generate')}
+								{/if}
+							</button>
+						</div>
+					</div>
+				{/if}
 				<input
 					bind:this={expressionInput}
 					type="file"

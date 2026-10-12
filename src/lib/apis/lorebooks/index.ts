@@ -186,3 +186,48 @@ export const updateChatRoleplaySettings = async (
 			body: JSON.stringify(settings)
 		})
 	).json();
+
+export type RoleplayAssistForm = {
+	model_id: string;
+	messages: { role: string; content: unknown }[];
+	chat_id?: string | null;
+	message_id?: string | null;
+	persona_id?: string | null;
+	draft?: string;
+	style?: string;
+};
+
+// Writes the user's next message, as their persona, for them to review before sending.
+export const impersonateUser = async (
+	token: string,
+	form: RoleplayAssistForm
+): Promise<{ content: string }> =>
+	(
+		await request('/chats/roleplay/impersonate', token, {
+			method: 'POST',
+			body: JSON.stringify(form)
+		})
+	).json();
+
+export const generateSceneImage = async (
+	token: string,
+	form: RoleplayAssistForm
+): Promise<{ prompt: string; images: { id?: string; url: string }[] }> =>
+	(
+		await request('/chats/roleplay/scene-image', token, {
+			method: 'POST',
+			body: JSON.stringify(form)
+		})
+	).json();
+
+export type LoreSuggestion = { name: string; keys: string[]; content: string };
+
+export const suggestLoreEntries = async (
+	token: string,
+	chatId: string
+): Promise<{ suggestions: LoreSuggestion[]; source: 'memory' | 'chat' }> =>
+	(
+		await request(`/chats/${encodeURIComponent(chatId)}/roleplay/lore/suggest`, token, {
+			method: 'POST'
+		})
+	).json();

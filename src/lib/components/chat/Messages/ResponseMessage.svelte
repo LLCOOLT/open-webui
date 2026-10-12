@@ -23,8 +23,10 @@
 		settings,
 		temporaryChatEnabled,
 		TTSWorker,
-		user
+		user,
+		chatPersonaId
 	} from '$lib/stores';
+	import { generateSceneImage } from '$lib/apis/lorebooks';
 	import { synthesizeOpenAISpeech } from '$lib/apis/audio';
 	import { imageGenerations } from '$lib/apis/images';
 	import {
@@ -47,6 +49,8 @@
 	import { characterExpressionUrl } from '$lib/apis/models';
 	import Image from '$lib/components/common/Image.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import Spinner from '$lib/components/common/Spinner.svelte';
+	import Photo from '$lib/components/icons/Photo.svelte';
 	import RateComment from './RateComment.svelte';
 	import WebSearchResults from './ResponseMessage/WebSearchResults.svelte';
 	import Sparkles from '$lib/components/icons/Sparkles.svelte';
@@ -205,6 +209,48 @@
 		($config?.features?.enable_character_cards ?? false) &&
 		($settings?.roleplayFormatting ?? true) &&
 		!!(model as any)?.info?.meta?.character;
+
+	// Picture this scene (character chats): draw the moment this reply ends on and attach it.
+	$: canPictureScene =
+		!readOnly &&
+		!!(model as any)?.info?.meta?.character &&
+		($config?.features?.enable_character_cards ?? false) &&
+		!!$config?.features?.enable_image_generation &&
+		($user?.role === 'admin' || !!$user?.permissions?.features?.image_generation);
+	let picturing = false;
+
+	const pictureScene = async () => {
+		if (picturing) return;
+		picturing = true;
+		try {
+			const messages = createMessagesList(history, message.id)
+				.slice(-30)
+				.map((item) => ({
+					role: item.role,
+					content:
+						item.role === 'assistant' ? getOutputText(item.output) || item.content : item.content
+				}));
+			const { images } = await generateSceneImage(localStorage.token, {
+				model_id: model.id,
+				messages,
+				chat_id: chatId,
+				message_id: message.id,
+				persona_id: $chatPersonaId
+			});
+			const current = history.messages[message.id] ?? message;
+			saveMessage(message.id, {
+				...current,
+				files: [
+					...(current.files ?? []),
+					...images.map((image) => ({ type: 'image', url: image.url }))
+				]
+			});
+		} catch (error: any) {
+			toast.error(error?.detail ?? `${error}`);
+		} finally {
+			picturing = false;
+		}
+	};
 
 	$: statusEntries = message?.statusHistory ?? [...(message?.status ? [message?.status] : [])];
 	$: hasVisibleStatus =
@@ -1382,6 +1428,26 @@
 														d="M15.91 11.672a.375.375 0 0 1 0 .656l-5.603 3.113a.375.375 0 0 1-.557-.328V8.887c0-.286.307-.466.557-.327l5.603 3.112Z"
 													/>
 												</svg>
+											</button>
+										</Tooltip>
+									{/if}
+
+									{#if canPictureScene && message.done}
+										<Tooltip content={$i18n.t('Picture this scene')} placement="bottom">
+											<button
+												type="button"
+												aria-label={$i18n.t('Picture this scene')}
+												disabled={picturing}
+												class="{isLastMessage || ($settings?.highContrastMode ?? false)
+													? 'visible'
+													: 'hover-reveal'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition disabled:cursor-wait"
+												on:click={pictureScene}
+											>
+												{#if picturing}
+													<Spinner className="size-4" />
+												{:else}
+													<Photo className="size-4" strokeWidth="2" />
+												{/if}
 											</button>
 										</Tooltip>
 									{/if}

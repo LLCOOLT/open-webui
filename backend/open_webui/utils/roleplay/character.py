@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 from open_webui.utils.roleplay.cards import CharacterData
+from open_webui.utils.roleplay.cleanup import ReplyCleanup
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 OverrideMode = Literal['replace', 'supplement']
@@ -43,6 +44,8 @@ class CharacterMeta(CharacterData):
     avatar_file_id: str | None = None
     # Emotion images: expression name -> file id (see ``utils.roleplay.expressions``).
     expressions: dict[str, str] = Field(default_factory=dict)
+    # What is cut or replaced in finished replies (see ``utils.roleplay.cleanup``).
+    reply_cleanup: ReplyCleanup = Field(default_factory=ReplyCleanup)
 
     @field_validator('expressions', mode='before')
     @classmethod
@@ -58,11 +61,13 @@ class CharacterMeta(CharacterData):
                 cleaned.setdefault(name, file_id)
         return cleaned
 
-    @field_validator('prompt_overrides', 'depth_prompt', mode='before')
+    @field_validator('prompt_overrides', 'depth_prompt', 'reply_cleanup', mode='before')
     @classmethod
     def default_when_null(cls, value, info):
         if value is None:
-            return PromptOverrides() if info.field_name == 'prompt_overrides' else DepthPrompt()
+            return {'prompt_overrides': PromptOverrides, 'depth_prompt': DepthPrompt, 'reply_cleanup': ReplyCleanup}[
+                info.field_name
+            ]()
         return value
 
     @classmethod

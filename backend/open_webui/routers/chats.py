@@ -39,9 +39,19 @@ from open_webui.utils.access_control import filter_allowed_access_grants, has_pe
 from open_webui.utils.access_control.folders import has_folder_write_access
 from open_webui.utils.auth import bearer_security, get_admin_user, get_current_user, get_verified_user
 from open_webui.utils.chat_fork import build_fork_history
+from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.context_compaction import compact_chat_branch, get_chat_context_usage
 from open_webui.utils.misc import get_message_list
 from open_webui.utils.models import get_all_models
+from open_webui.utils.roleplay.assist import (
+    clean_image_prompt,
+    clean_impersonation,
+    impersonate_prompt,
+    lore_prompt,
+    parse_lore_suggestions,
+    scene_prompt,
+    transcript,
+)
 from open_webui.utils.roleplay.character import DepthPrompt
 from open_webui.utils.roleplay.filter import get_model_character, skip_character_system_prompt
 from open_webui.utils.roleplay.memory import (
@@ -50,7 +60,9 @@ from open_webui.utils.roleplay.memory import (
     memory_enabled_for_chat,
     memory_overrides,
 )
-from open_webui.utils.roleplay.persona import resolve_persona
+from open_webui.utils.roleplay.persona import persona_description, resolve_persona
+from open_webui.utils.roleplay.prompt import build_macro_context
+from open_webui.utils.roleplay.task_model import run_task_prompt
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1511,6 +1523,164 @@ async def refresh_chat_memory(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='The chat is too short to summarize yet.')
     chat, messages_map, current_id = await _chat_branch(id, user, db)
     return await _chat_memory(chat, messages_map, current_id)
+
+
+############################
+# Roleplay assists: impersonate, scene images, lorebook suggestions
+############################
+
+
+class RoleplayAssistForm(BaseModel):
+    model_id: str
+    # The current branch as the client has it (role and content), oldest first.
+    messages: list[dict] = Field(default_factory=list, max_length=500)
+    chat_id: str | None = None
+    message_id: str | None = None
+    persona_id: str | None = None
+    draft: str = Field(default='', max_length=10_000)
+    style: str = Field(default='', max_length=300)
+
+
+async def _roleplay_context(request: Request, form_data: RoleplayAssistForm, user, db):
+    """The character model (which the user may use), its character and the macro context."""
+    from open_webui.routers.models import _get_character_model, _require_character_cards_enabled
+
+    await _require_character_cards_enabled()
+    model = await _get_character_model(form_data.model_id, user, db, 'read')
+    if not request.app.state.MODELS or model.id not in request.app.state.MODELS:
+        await get_all_models(request, user=user)
+    chat_meta = {}
+    if is_saved_chat_id(form_data.chat_id):
+        chat_meta = await Chats.get_chat_meta_by_id_and_user_id(form_data.chat_id, user.id, db=db) or {}
+    persona = resolve_persona(user, form_data.persona_id, chat_meta.get('persona_id'))
+    character = model.meta.character
+    ctx = build_macro_context(
+        character,
+        model_name=model.name,
+        user_name=(persona or {}).get('name') or user.name,
+        persona=persona_description(persona),
+    )
+    return model, character, ctx
+
+
+@router.post('/roleplay/impersonate')
+async def impersonate_user(
+    request: Request,
+    form_data: RoleplayAssistForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Write the user's next message (as their persona) for them to review before sending."""
+    model, character, ctx = await _roleplay_context(request, form_data, user, db)
+    prompt = impersonate_prompt(character, ctx, form_data.messages, form_data.draft)
+    # The chat model writes it (task models are often too small to match a writing style), without
+    # the character prompt, which would make it answer as the character.
+    skip_character_system_prompt(request, model.id)
+    try:
+        reply = await run_task_prompt(request, user, model.id, prompt, 'character_impersonate', direct=True)
+    except Exception as error:
+        log.info('Impersonation failed for %s: %s', model.id, error)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='The model did not answer.') from error
+    text = clean_impersonation(reply, ctx)
+    if not text:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='The model returned an empty message.')
+    return {'content': text}
+
+
+async def _require_image_generation(user, db) -> None:
+    from open_webui.routers.images import get_image_config
+
+    image_config = await get_image_config()
+    if not image_config.ENABLE_IMAGE_GENERATION:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Image generation is not set up.')
+    if user.role != 'admin' and not await has_permission(
+        user.id, 'features.image_generation', image_config.USER_PERMISSIONS, db=db
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
+
+
+@router.post('/roleplay/scene-image')
+async def generate_scene_image(
+    request: Request,
+    form_data: RoleplayAssistForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Picture the current moment: the task model writes an image prompt from the characters'
+    looks and the recent messages, then the configured image generator draws it."""
+    from open_webui.routers.images import CreateImageForm, image_generations
+
+    await _require_image_generation(user, db)
+    model, character, ctx = await _roleplay_context(request, form_data, user, db)
+    skip_character_system_prompt(request, model.id)
+    try:
+        reply = await run_task_prompt(
+            request, user, model.id, scene_prompt(character, ctx, form_data.messages, form_data.style), 'scene_image'
+        )
+    except Exception as error:
+        log.info('Scene prompt failed for %s: %s', model.id, error)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='The model did not answer.') from error
+    image_prompt = clean_image_prompt(reply)
+    if not image_prompt:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='The model returned an empty prompt.')
+
+    metadata = {}
+    if (
+        is_saved_chat_id(form_data.chat_id)
+        and form_data.message_id
+        and await Chats.get_chat_by_id_and_user_id(form_data.chat_id, user.id, db=db)
+    ):
+        # Linked to the message, like images generated in chat.
+        metadata = {'chat_id': form_data.chat_id, 'message_id': form_data.message_id}
+    images = await image_generations(request, CreateImageForm(prompt=image_prompt), metadata=metadata, user=user)
+    return {'prompt': image_prompt, 'images': images}
+
+
+class LoreSuggestionsResponse(BaseModel):
+    suggestions: list[dict]
+    source: str  # 'memory' or 'chat': what the suggestions were drawn from
+
+
+@router.post('/{id}/roleplay/lore/suggest', response_model=LoreSuggestionsResponse)
+async def suggest_lore_entries(
+    request: Request, id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+):
+    """New lorebook entries for lasting facts in the chat's story memory (or, before there is one,
+    its recent messages), leaving out what the chat's and character's lorebooks already cover."""
+    chat, messages_map, current_id = await _chat_branch(id, user, db)
+    message_list = [messages_map[key] for key in branch_message_ids(messages_map, current_id)]
+    model_id = next((m.get('model') for m in reversed(message_list) if m.get('model')), None) or next(
+        iter((chat.chat or {}).get('models') or []), None
+    )
+    if not model_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='No model found for this chat.')
+    model, character, ctx = await _roleplay_context(
+        request, RoleplayAssistForm(model_id=model_id, chat_id=id), user, db
+    )
+
+    memory = latest_memory(messages_map, current_id)['summary']
+    source = 'memory' if memory else 'chat'
+    text = memory or transcript(message_list, ctx.char, ctx.user)
+    if not text.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='The chat is empty.')
+
+    lorebook_ids = list(
+        dict.fromkeys([*(model.meta.lorebook_ids or []), *((chat.meta or {}).get('lorebook_ids') or [])])
+    )
+    books = [
+        lorebook.as_book() for lorebook in await Lorebooks.get_readable_lorebooks_by_ids(lorebook_ids, user.id, db=db)
+    ]
+    if character.character_book:
+        books.append(character.character_book)
+    existing = [entry for book in books for entry in (book.get('entries') or []) if isinstance(entry, dict)]
+
+    skip_character_system_prompt(request, model.id)
+    try:
+        reply = await run_task_prompt(request, user, model.id, lore_prompt(text, existing, ctx), 'lore_suggestions')
+    except Exception as error:
+        log.info('Lorebook suggestions failed for %s: %s', model.id, error)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='The model did not answer.') from error
+    return LoreSuggestionsResponse(suggestions=parse_lore_suggestions(reply, existing, ctx), source=source)
 
 
 @router.get('/{id}', response_model=ChatResponse | None)

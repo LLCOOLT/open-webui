@@ -4,13 +4,18 @@
 
 	import { chatId, chatPersonaId, settings } from '$lib/stores';
 	import {
+		createLorebook,
 		getChatMemory,
 		getChatRoleplaySettings,
+		getLorebookById,
 		refreshChatMemory,
+		suggestLoreEntries,
 		updateChatMemory,
 		updateChatRoleplaySettings,
+		updateLorebookById,
 		type ChatMemory,
-		type ChatRoleplaySettings
+		type ChatRoleplaySettings,
+		type Lorebook
 	} from '$lib/apis/lorebooks';
 	import LorebookPicker from '$lib/components/workspace/Lorebooks/LorebookPicker.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -65,7 +70,10 @@
 							action === 'clear' ? '' : memoryDraft
 						)
 			);
-			if (action === 'refresh') toast.success($i18n.t('Story memory updated'));
+			if (action === 'refresh') {
+				toast.success($i18n.t('Story memory updated'));
+				memoryChanged = true;
+			}
 		} catch (error: any) {
 			toast.error(`${error?.detail ?? error}`);
 		} finally {
@@ -73,7 +81,94 @@
 		}
 	};
 
-	const onMemoryUpdated = () => loadMemory();
+	const onMemoryUpdated = () => {
+		memoryChanged = true;
+		loadMemory();
+	};
+
+	// Lorebook suggestions: lasting facts from the story memory, reviewed before they are added.
+	type Suggestion = { name: string; keys: string; content: string; selected: boolean };
+	let suggestions: Suggestion[] | null = null;
+	let suggestionSource: 'memory' | 'chat' = 'memory';
+	let suggesting = false;
+	let addingLore = false;
+	let memoryChanged = false; // the memory changed since suggestions were last checked
+	let targetLorebook = '__new__';
+	let writableBooks: Lorebook[] = [];
+
+	const suggestLore = async () => {
+		if (!loadedFor) return;
+		suggesting = true;
+		try {
+			const result = await suggestLoreEntries(localStorage.token, loadedFor);
+			suggestionSource = result.source;
+			suggestions = result.suggestions.map((item) => ({
+				name: item.name,
+				keys: item.keys.join(', '),
+				content: item.content,
+				selected: true
+			}));
+			memoryChanged = false;
+			if (!suggestions.length) toast.info($i18n.t('No new facts to add'));
+			const books = await Promise.all(
+				(chatSettings?.lorebook_ids ?? []).map((id) =>
+					getLorebookById(localStorage.token, id).catch(() => null)
+				)
+			);
+			writableBooks = books.filter((book): book is Lorebook => !!book?.write_access);
+			if (!writableBooks.some((book) => book.id === targetLorebook)) {
+				targetLorebook = writableBooks[0]?.id ?? '__new__';
+			}
+		} catch (error: any) {
+			toast.error(`${error?.detail ?? error}`);
+		} finally {
+			suggesting = false;
+		}
+	};
+
+	const addLore = async () => {
+		const chosen = (suggestions ?? []).filter((item) => item.selected && item.content.trim());
+		if (!loadedFor || !chosen.length) return;
+		addingLore = true;
+		try {
+			const entries = (startId: number) =>
+				chosen.map((item, index) => ({
+					id: startId + index,
+					name: item.name,
+					comment: item.name,
+					keys: item.keys
+						.split(',')
+						.map((key) => key.trim())
+						.filter(Boolean),
+					content: item.content.trim(),
+					enabled: true
+				}));
+			if (targetLorebook === '__new__') {
+				const book = await createLorebook(localStorage.token, {
+					name: $i18n.t('Story facts'),
+					description: $i18n.t('Facts from a roleplay chat, added from its story memory.'),
+					data: { entries: entries(0) as any }
+				});
+				await save([...(chatSettings?.lorebook_ids ?? []), book.id]);
+			} else {
+				const book = await getLorebookById(localStorage.token, targetLorebook);
+				const existing = book.data?.entries ?? [];
+				const nextId = Math.max(-1, ...existing.map((entry) => Number(entry.id) || 0)) + 1;
+				await updateLorebookById(localStorage.token, book.id, {
+					name: book.name,
+					description: book.description,
+					data: { ...book.data, entries: [...existing, ...(entries(nextId) as any)] },
+					meta: book.meta
+				});
+			}
+			toast.success($i18n.t('Added {{COUNT}} lorebook entries', { COUNT: chosen.length }));
+			suggestions = null;
+		} catch (error: any) {
+			toast.error(`${error?.detail ?? error}`);
+		} finally {
+			addingLore = false;
+		}
+	};
 	onMount(() => window.addEventListener('roleplay:memory-updated', onMemoryUpdated));
 	onDestroy(() => window.removeEventListener('roleplay:memory-updated', onMemoryUpdated));
 	$: defaultPersona = personas.find((persona) => persona.is_default);
@@ -258,6 +353,106 @@
 								{$i18n.t('Clear')}
 							</button>
 						{/if}
+					</div>
+				{/if}
+			</div>
+		{/if}
+
+		{#if isCharacterChat}
+			<div>
+				<div class="mb-1 flex items-center justify-between text-gray-500">
+					<span>{$i18n.t('Lorebook suggestions')}</span>
+					<button
+						type="button"
+						class="px-2 py-0.5 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 flex items-center gap-1"
+						disabled={suggesting}
+						title={$i18n.t(
+							'Find people, places and facts from the story that no lorebook covers yet'
+						)}
+						on:click={suggestLore}
+					>
+						{#if suggesting}<Spinner className="size-3" />{/if}
+						{$i18n.t('Suggest entries')}
+					</button>
+				</div>
+				{#if memoryChanged && !suggestions}
+					<div class="text-gray-400">
+						{$i18n.t('The story memory was updated. Check it for new facts to keep in a lorebook.')}
+					</div>
+				{/if}
+				{#if suggestions?.length}
+					<div class="text-gray-400 mb-1">
+						{suggestionSource === 'memory'
+							? $i18n.t('From the story memory. Edit or untick before adding.')
+							: $i18n.t(
+									'From the recent messages (there is no story memory yet). Edit or untick before adding.'
+								)}
+					</div>
+					<div class="flex flex-col gap-2">
+						{#each suggestions as item}
+							<div
+								class="rounded-lg border border-gray-100 dark:border-gray-850 p-1.5 {item.selected
+									? ''
+									: 'opacity-50'}"
+							>
+								<div class="flex items-center gap-1.5">
+									<input
+										type="checkbox"
+										aria-label={$i18n.t('Add {{NAME}}', { NAME: item.name })}
+										bind:checked={item.selected}
+									/>
+									<input
+										class="flex-1 min-w-0 bg-transparent outline-hidden font-medium"
+										aria-label={$i18n.t('Name')}
+										bind:value={item.name}
+									/>
+								</div>
+								<input
+									class="w-full bg-transparent outline-hidden text-gray-500"
+									aria-label={$i18n.t('Keywords')}
+									placeholder={$i18n.t('Keywords, comma-separated')}
+									bind:value={item.keys}
+								/>
+								<Textarea
+									className="w-full resize-vertical bg-transparent outline-hidden"
+									ariaLabel={$i18n.t('Content')}
+									bind:value={item.content}
+									rows={2}
+								/>
+							</div>
+						{/each}
+					</div>
+					<div class="mt-1.5 flex items-center justify-between gap-2">
+						<select
+							class="bg-transparent pr-6 outline-hidden min-w-0"
+							aria-label={$i18n.t('Add to')}
+							bind:value={targetLorebook}
+						>
+							{#each writableBooks as book (book.id)}
+								<option value={book.id}>{book.name}</option>
+							{/each}
+							<option value="__new__">{$i18n.t('New lorebook for this chat')}</option>
+						</select>
+						<span class="flex items-center gap-1.5 shrink-0">
+							<button
+								type="button"
+								class="px-2 py-0.5 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-850"
+								on:click={() => (suggestions = null)}
+							>
+								{$i18n.t('Dismiss')}
+							</button>
+							<button
+								type="button"
+								class="px-2 py-0.5 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 flex items-center gap-1"
+								disabled={addingLore || !suggestions.some((item) => item.selected)}
+								on:click={addLore}
+							>
+								{#if addingLore}<Spinner className="size-3" />{/if}
+								{$i18n.t('Add {{COUNT}}', {
+									COUNT: suggestions.filter((item) => item.selected).length
+								})}
+							</button>
+						</span>
 					</div>
 				{/if}
 			</div>

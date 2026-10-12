@@ -132,6 +132,7 @@ from open_webui.utils.response import merge_usage, normalize_usage
 from open_webui.utils.roleplay.filter import (
     apply_character_messages,
     apply_character_system,
+    clean_character_reply,
     roleplay_memory_settings,
 )
 from open_webui.utils.sanitize import sanitize_code
@@ -6556,6 +6557,8 @@ async def streaming_chat_response_handler(response, ctx):
                         item['status'] = 'completed'
 
                 current_output = full_output()
+                # The cleaned text replaces what was streamed, everywhere below.
+                reply_cleaned = clean_character_reply(request, current_output)
                 title = await Chats.get_chat_title_by_id(metadata['chat_id']) if save_to_chat else ''
                 data = {
                     'done': True,
@@ -6583,7 +6586,7 @@ async def streaming_chat_response_handler(response, ctx):
                     user,
                     metadata,
                     title,
-                    get_output_text(current_output) if continuing else ''.join(content_parts),
+                    get_output_text(current_output) if continuing or reply_cleaned else ''.join(content_parts),
                     current_output,
                 )
 
@@ -6596,7 +6599,7 @@ async def streaming_chat_response_handler(response, ctx):
 
                 ctx['assistant_message'] = {
                     'content': get_output_text(current_output)
-                    if continuing
+                    if continuing or reply_cleaned
                     else ''.join(content_parts) or get_output_text(current_output),
                     'output': current_output,
                     **({'usage': usage} if usage else {}),

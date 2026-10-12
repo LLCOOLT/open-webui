@@ -58,6 +58,7 @@ from open_webui.utils.access_control.files import has_access_to_file
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.chat_variables import get_chat_variables_schema
 from open_webui.utils.models import get_all_models
+from open_webui.utils.roleplay.assist import clean_image_prompt, sprite_edit_prompt, sprite_prompt
 from open_webui.utils.roleplay.cards import (
     ZIP_SIGNATURE,
     CardParseError,
@@ -1490,6 +1491,100 @@ async def classify_character_expression(
         log.info('Expression classification failed for %s: %s', model.id, error)
         return {'name': None}
     return {'name': pick_expression(reply, names)}
+
+
+class ExpressionGenerateForm(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    style: str = Field(default='', max_length=300)
+
+
+async def _generated_image_bytes(image: dict, db: AsyncSession) -> bytes:
+    file = await Files.get_file_by_id(image.get('id') or '', db=db)
+    if not file or not file.path:
+        raise HTTPException(status_code=502, detail='The image generator returned no image.')
+    path = await asyncio.to_thread(Storage.get_file, file.path)
+    with open(path, 'rb') as handle:
+        return await asyncio.to_thread(handle.read, CHARACTER_CARD_MAX_BYTES)
+
+
+@router.post('/model/character/expressions/generate', response_model=CharacterExpressionsResponse)
+async def generate_character_expression(
+    request: Request,
+    id: str,
+    form_data: ExpressionGenerateForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Draw one expression image. With image editing set up and an avatar, the avatar is redrawn
+    with the expression (keeps the look and art style); otherwise the image generator draws a
+    portrait from a prompt the task model writes from the character's description."""
+    from open_webui.routers.images import (
+        CreateImageForm,
+        EditImageForm,
+        get_image_config,
+        image_edits,
+        image_generations,
+    )
+
+    await _require_character_cards_enabled()
+    model = await _get_character_model(id, user, db, 'write')
+    character = model.meta.character
+    name = clean_expression_name(form_data.name)
+    if not name:
+        raise HTTPException(status_code=400, detail='Give the expression a name.')
+    if name not in character.expressions and len(character.expressions) >= MAX_EXPRESSIONS:
+        raise HTTPException(status_code=400, detail='This character has the most expressions allowed.')
+
+    image_config = await get_image_config()
+    if user.role != 'admin' and not await has_permission(
+        user.id, 'features.image_generation', image_config.USER_PERMISSIONS, db=db
+    ):
+        raise HTTPException(status_code=403, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
+    avatar = await _read_avatar(model, db) if image_config.ENABLE_IMAGE_EDIT else None
+    if avatar:
+        content_type = sniff_image_type(avatar) or 'image/png'
+        data_url = f'data:{content_type};base64,{base64.b64encode(avatar).decode()}'
+        images = await image_edits(
+            request, EditImageForm(image=data_url, prompt=sprite_edit_prompt(name)), metadata={}, user=user
+        )
+    elif image_config.ENABLE_IMAGE_GENERATION:
+        if not request.app.state.MODELS:
+            await get_all_models(request, user=user)
+        ctx = build_macro_context(character, model_name=model.name, user_name=user.name)
+        skip_character_system_prompt(request, model.id)
+        try:
+            reply = await run_task_prompt(
+                request, user, model.id, sprite_prompt(character, ctx, name, form_data.style), 'character_sprite'
+            )
+        except Exception as error:
+            raise HTTPException(status_code=502, detail='The model did not answer.') from error
+        prompt = clean_image_prompt(reply)
+        if not prompt:
+            raise HTTPException(status_code=502, detail='The model returned an empty prompt.')
+        images = await image_generations(request, CreateImageForm(prompt=prompt), metadata={}, user=user)
+    else:
+        raise HTTPException(status_code=400, detail='Image generation is not set up.')
+    if not images:
+        raise HTTPException(status_code=502, detail='The image generator returned no image.')
+
+    uploads: list = []
+    try:
+        image = await _generated_image_bytes(images[0], db)
+        stored = await _store_expression(request, name, image, user, db, uploads)
+        if stored is None:
+            raise HTTPException(status_code=502, detail='The image generator returned an unreadable image.')
+        previous = character.expressions.get(stored[0])
+        character.expressions[stored[0]] = stored[1]
+        await _save_character_meta(model, db)
+    except Exception:
+        await _discard_uploads(uploads, db)
+        raise
+    finally:
+        # The generator's own copies; the expression keeps a normalized one.
+        await _discard_file_ids([image.get('id') for image in images if image.get('id')], db)
+    if previous:
+        await _discard_file_ids([previous], db)
+    return CharacterExpressionsResponse(expressions=sorted(character.expressions))
 
 
 async def _discard_file_ids(file_ids: list[str], db: AsyncSession) -> None:
