@@ -1135,6 +1135,28 @@
 		</div>
 
 		<div class="flex flex-col w-full">
+			<Tooltip
+				className="flex w-full justify-between my-1"
+				content={$i18n.t(
+					'Warning: Enabling this will allow users to connect brokerage accounts and access market data.'
+				)}
+				placement="top-start"
+			>
+				<div class=" self-center text-xs font-normal">
+					{$i18n.t('Markets')}
+				</div>
+				<Switch bind:state={permissions.features.finance} ariaLabel={$i18n.t('Markets')} />
+			</Tooltip>
+			{#if defaultPermissions?.features?.finance && !permissions.features.finance}
+				<div>
+					<div class="text-xs text-gray-500">
+						{$i18n.t('This is a default user permission and will remain enabled.')}
+					</div>
+				</div>
+			{/if}
+		</div>
+
+		<div class="flex flex-col w-full">
 			<div class="flex w-full justify-between my-1">
 				<div class=" self-center text-xs font-normal">
 					{$i18n.t('Calendar')}

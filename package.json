@@ -116,6 +116,7 @@
 		"katex": "^0.16.22",
 		"kokoro-js": "^1.1.1",
 		"leaflet": "^1.9.4",
+		"lightweight-charts": "^5.2.1",
 		"lowlight": "^3.3.0",
 		"mammoth": "^1.11.0",
 		"marked": "^9.1.0",

@@ -18,6 +18,7 @@
 	import Emoji from '$lib/components/common/Emoji.svelte';
 	import CalendarIcon from './icons/Calendar.svelte';
 	import ClockIcon from './icons/Clock.svelte';
+	import ChartLineIcon from './icons/ChartLine.svelte';
 	import CodeIcon from './icons/Code.svelte';
 	import EmojiFaceIcon from './icons/EmojiFace.svelte';
 	import HelpCircleIcon from './icons/HelpCircle.svelte';
@@ -412,6 +413,52 @@
 								on:click|preventDefault|stopPropagation={() => togglePin('automations')}
 							>
 								{#if isPinned('automations')}
+									<PinSlashIcon className="size-3.5" strokeWidth="1.5" />
+								{:else}
+									<PinIcon className="size-3.5" strokeWidth="1.5" />
+								{/if}
+							</button>
+						</Tooltip>
+					{/if}
+				</div>
+			{/if}
+
+			{#if ($config?.features as any)?.enable_finance && ($user?.role === 'admin' || ($user?.permissions?.features as any)?.finance)}
+				<div
+					class="user-menu-row flex items-center w-full rounded-xl hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition-colors"
+				>
+					<a
+						href="/markets"
+						draggable="false"
+						class="flex flex-1 min-w-0 h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none"
+						on:click={async (e) => {
+							if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
+							e.preventDefault();
+							show = false;
+							goto('/markets');
+							if ($mobile) {
+								await tick();
+								showSidebar.set(false);
+							}
+						}}
+					>
+						<div class="self-center">
+							<ChartLineIcon className="size-3.5" strokeWidth="1.5" />
+						</div>
+						<div class="self-center truncate">{$i18n.t('Markets')}</div>
+					</a>
+					{#if shiftKey}
+						<Tooltip
+							content={isPinned('markets')
+								? $i18n.t('Unpin from Sidebar')
+								: $i18n.t('Pin to Sidebar')}
+						>
+							<button
+								type="button"
+								class="p-1 mr-1 rounded-lg hover:bg-gray-100/60 dark:hover:bg-gray-700/60 transition"
+								on:click|preventDefault|stopPropagation={() => togglePin('markets')}
+							>
+								{#if isPinned('markets')}
 									<PinSlashIcon className="size-3.5" strokeWidth="1.5" />
 								{:else}
 									<PinIcon className="size-3.5" strokeWidth="1.5" />

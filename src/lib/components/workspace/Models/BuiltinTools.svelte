@@ -70,6 +70,10 @@
 			label: $i18n.t('settings.admin.models.builtinTools.calendar.label'),
 			description: $i18n.t('settings.admin.models.builtinTools.calendar.description')
 		},
+		finance: {
+			label: $i18n.t('Markets'),
+			description: $i18n.t('Read-only market data, fundamentals and brokerage account tools')
+		},
 		subagents: {
 			label: $i18n.t('settings.admin.models.builtinTools.subagents.label'),
 			description: $i18n.t('settings.admin.models.builtinTools.subagents.description')

@@ -377,6 +377,15 @@
 					<Switch bind:state={adminConfig.ENABLE_AUTOMATIONS} ariaLabelledbyId={labelId} />
 				</AdminSettingRow>
 				<AdminSettingRow
+					label={$i18n.t('Markets')}
+					description={$i18n.t(
+						'Stock market data, brokerage connections and finance tools (paper trading by default).'
+					)}
+					let:labelId
+				>
+					<Switch bind:state={adminConfig.ENABLE_FINANCE} ariaLabelledbyId={labelId} />
+				</AdminSettingRow>
+				<AdminSettingRow
 					label={$i18n.t('settings.admin.general.userWebhooks.label')}
 					description={$i18n.t('settings.admin.general.userWebhooks.description')}
 					let:labelId

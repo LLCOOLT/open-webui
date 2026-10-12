@@ -70,6 +70,7 @@ export const DEFAULT_PERMISSIONS = {
 		code_interpreter: true,
 		memories: true,
 		automations: false,
+		finance: false,
 		calendar: true,
 		webhooks: false
 	},

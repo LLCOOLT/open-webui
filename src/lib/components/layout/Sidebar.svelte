@@ -81,6 +81,7 @@
 	import CalendarIcon from './Sidebar/icons/Calendar.svelte';
 	import ClockIcon from './Sidebar/icons/Clock.svelte';
 	import CodeIcon from './Sidebar/icons/Code.svelte';
+	import ChartLineIcon from './Sidebar/icons/ChartLine.svelte';
 	import EditPencilIcon from './Sidebar/icons/EditPencil.svelte';
 	import NotesIcon from './Sidebar/icons/Notes.svelte';
 	import SearchIcon from './Sidebar/icons/Search.svelte';
@@ -175,6 +176,11 @@
 					$config?.features?.enable_automations &&
 					($user?.role === 'admin' || $user?.permissions?.features?.automations)
 				);
+			case 'markets':
+				return (
+					($config?.features as any)?.enable_finance &&
+					($user?.role === 'admin' || ($user?.permissions?.features as any)?.finance)
+				);
 			case 'calendar':
 				return (
 					$config?.features?.enable_calendar &&
@@ -192,6 +198,7 @@
 			notes: { label: $i18n.t('Notes'), href: '/notes', iconType: 'note' },
 			workspace: { label: $i18n.t('Workspace'), href: '/workspace', iconType: 'workspace' },
 			automations: { label: $i18n.t('Automations'), href: '/automations', iconType: 'automations' },
+			markets: { label: $i18n.t('Markets'), href: '/markets', iconType: 'markets' },
 			calendar: { label: $i18n.t('Calendar'), href: '/calendar', iconType: 'calendar' },
 			playground: { label: $i18n.t('Playground'), href: '/playground', iconType: 'playground' }
 		};
@@ -203,6 +210,7 @@
 		workspace: '/workspace',
 		calendar: '/calendar',
 		automations: '/automations',
+		markets: '/markets',
 		playground: '/playground'
 	};
 
@@ -1057,6 +1065,8 @@
 												<WorkspaceIcon className="size-4" strokeWidth="1.5" />
 											{:else if itemId === 'automations'}
 												<ClockIcon className="size-4" strokeWidth="1.5" />
+											{:else if itemId === 'markets'}
+												<ChartLineIcon className="size-4" strokeWidth="1.5" />
 											{:else if itemId === 'calendar'}
 												<CalendarIcon className="size-4" strokeWidth="1.5" />
 											{:else if itemId === 'playground'}
@@ -1279,6 +1289,8 @@
 													<WorkspaceIcon className="size-4" strokeWidth="1.5" />
 												{:else if itemId === 'automations'}
 													<ClockIcon className="size-4" strokeWidth="1.5" />
+												{:else if itemId === 'markets'}
+													<ChartLineIcon className="size-4" strokeWidth="1.5" />
 												{:else if itemId === 'calendar'}
 													<CalendarIcon className="size-4" strokeWidth="1.5" />
 												{:else if itemId === 'playground'}
