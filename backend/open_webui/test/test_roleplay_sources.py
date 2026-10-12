@@ -354,7 +354,7 @@ async def test_poe_bot_import(fake_get):
     responses['https://poe.com/Nobody'] = poe_page(None)
     with pytest.raises(SourceError, match='no bot named'):
         await download_card('poe', 'Nobody')
-    with pytest.raises(SourceError, match='could be found'):
+    with pytest.raises(SourceError, match='No Poe bot has that name'):
         await search_cards('poe', 'Nobody')
 
     # A picture somewhere else is not fetched; the card comes back as JSON.
@@ -747,3 +747,49 @@ async def test_janny_search_with_configured_key_and_import_from_hits(fake_get, m
             await search_cards('janny', 'sera')
     finally:
         await Config.upsert({'characters.sources.janny.search_key': ''})
+
+
+async def test_poe_search_through_web_search(fake_get):
+    calls, responses = fake_get
+    responses['https://poe.com/ElfQueen'] = poe_page(
+        {'handle': 'ElfQueen', 'displayName': 'Elf Queen', 'description': 'Rules the forest.', 'isPromptPublic': False}
+    )
+    responses['https://poe.com/Ranger'] = poe_page(
+        {'handle': 'Ranger', 'displayName': 'Ranger', 'isPromptPublic': True, 'promptPlaintext': 'You are a ranger.'}
+    )
+    queries = []
+
+    async def web_search(query):
+        queries.append(query)
+        return [
+            'https://poe.com/ElfQueen',
+            'https://poe.com/explore',  # not a bot
+            'https://example.com/elf',  # another site
+            'https://www.poe.com/Ranger?ref=x',
+            'https://poe.com/ElfQueen',  # duplicate
+        ]
+
+    page = await search_cards('poe', 'forest elf roleplay', web_search=web_search)
+    assert queries == ['site:poe.com forest elf roleplay']
+    assert [item.name for item in page.items] == ['Elf Queen', 'Ranger']
+
+    # Links skip the web search; one word is tried as a bot name and searched.
+    queries.clear()
+    page = await search_cards('poe', 'https://poe.com/Ranger', web_search=web_search)
+    assert queries == [] and [item.id for item in page.items] == ['Ranger']
+    page = await search_cards('poe', 'Ranger', web_search=web_search)
+    assert queries == ['site:poe.com Ranger'] and [item.id for item in page.items] == ['Ranger', 'ElfQueen']
+
+    # Web search failing or off: names still work, and the error says how to search.
+    async def broken(query):
+        raise RuntimeError('engine down')
+
+    assert [item.id for item in (await search_cards('poe', 'Ranger', web_search=broken)).items] == ['Ranger']
+    with pytest.raises(SourceError, match='turn on Web Search'):
+        await search_cards('poe', 'forest elves')
+
+    async def nothing(query):
+        return []
+
+    with pytest.raises(SourceError, match='No Poe bots found'):
+        await search_cards('poe', 'forest elves', web_search=nothing)

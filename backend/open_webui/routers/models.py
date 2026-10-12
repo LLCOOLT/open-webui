@@ -1045,8 +1045,25 @@ async def list_card_sources(user=Depends(get_admin_user)):
     ]
 
 
+async def _web_search_links(request: Request, user):
+    """Open WebUI's configured web search, as a query -> result links function; ``None`` when off."""
+    if not await Config.get('web.search.enable'):
+        return None
+    engine = await Config.get('web.search.engine')
+    if not engine:
+        return None
+
+    async def search(query: str) -> list[str]:
+        from open_webui.routers.retrieval import search_web
+
+        return [result.link for result in await search_web(request, engine, query, user) if result.link]
+
+    return search
+
+
 @router.get('/characters/sources/{source_id}/search')
 async def search_card_source(
+    request: Request,
     source_id: str,
     q: str = '',
     page: int = 1,
@@ -1061,7 +1078,14 @@ async def search_card_source(
     await _require_character_cards_enabled()
     try:
         result = await search_cards(
-            source_id, q, page, sort, nsfw, tags=tags.split(','), exclude_tags=exclude_tags.split(',')
+            source_id,
+            q,
+            page,
+            sort,
+            nsfw,
+            tags=tags.split(','),
+            exclude_tags=exclude_tags.split(','),
+            web_search=await _web_search_links(request, user) if source_id == 'poe' else None,
         )
     except SourceError as error:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error

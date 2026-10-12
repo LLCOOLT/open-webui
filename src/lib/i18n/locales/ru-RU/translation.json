@@ -1,4 +1,6 @@
 {
+	"Search Poe bots, or paste bot links or names": "",
+	"Poe only lets its own app search bots, so searches here go through the web search engine set up in Admin Settings > Web Search. You can also paste bot links or names (several at once is fine).": "",
 	"JannyAI search key": "",
 	"JannyAI blocks servers from reading its search setup. To search it in the card browser, open jannyai.com/characters/search in your browser, open the developer tools (F12) > Network, search for anything, and select the \"multi-search\" request: copy the key after \"Bearer\" in its Authorization header, and the \"indexUid\" from its payload.": "",
 	"Search key": "",

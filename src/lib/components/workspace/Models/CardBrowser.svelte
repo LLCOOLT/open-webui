@@ -366,7 +366,7 @@
 		<input
 			class="{inputClass} flex-1 min-w-48 rounded-lg border border-gray-100 dark:border-gray-850 px-3 py-1.5"
 			placeholder={source === 'poe'
-				? $i18n.t('Paste Poe bot links or names (several at once is fine)')
+				? $i18n.t('Search Poe bots, or paste bot links or names')
 				: $i18n.t('Search characters')}
 			aria-label={$i18n.t('Search characters')}
 			bind:value={query}
@@ -475,7 +475,7 @@
 		<div class="mt-8 mx-auto max-w-xl text-center text-sm text-gray-500 space-y-2">
 			<p>
 				{$i18n.t(
-					'Poe only offers search to signed-in users in its own app, so find bots on poe.com, then paste their links or names above to read and import them here.'
+					'Poe only lets its own app search bots, so searches here go through the web search engine set up in Admin Settings > Web Search. You can also paste bot links or names (several at once is fine).'
 				)}
 			</p>
 			<p class="text-xs">

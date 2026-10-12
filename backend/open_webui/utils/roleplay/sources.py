@@ -17,6 +17,7 @@ import logging
 import re
 import time
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from urllib.parse import urlencode, urlparse
 
@@ -618,10 +619,37 @@ def _poe_summary(bot: dict) -> CardSummary:
     )
 
 
-async def _poe_search(query: str, page: int, sort: str, nsfw: bool, tags: TagFilter) -> SearchPage:
-    """Poe's own search needs a signed-in, signed request, so this looks up the bots the user
-    names instead: pasted links or bot names, several at once."""
-    handles = _poe_handles(query) if page == 1 else []
+WebSearch = Callable[[str], Awaitable[list[str]]]  # query -> result links
+POE_WEB_RESULTS = 12
+
+
+async def _poe_web_handles(query: str, web_search: WebSearch) -> list[str]:
+    """Bot handles from a web search of poe.com, in result order."""
+    links = await web_search(f'site:poe.com {query}')
+    handles: list[str] = []
+    for link in links:
+        found = parse_card_link(link)
+        if found and found[0] == 'poe' and found[1] not in handles:
+            handles.append(found[1])
+    return handles[:POE_WEB_RESULTS]
+
+
+async def _poe_search(
+    query: str, page: int, sort: str, nsfw: bool, tags: TagFilter, web_search: WebSearch | None = None
+) -> SearchPage:
+    """Poe's own search needs a signed-in, signed request. Instead: bots named or linked in the
+    query, and, with web search set up in Open WebUI, poe.com bots the web search engine finds."""
+    if page != 1 or not query.strip():
+        return SearchPage(items=[], page=page, has_more=False)
+    pasted = any(marker in query for marker in ('poe.com', '/', ',')) or len(query.split()) == 1
+    handles = _poe_handles(query) if pasted else []
+    searched = False
+    if web_search is not None and not any(marker in query for marker in ('poe.com', '/')):
+        try:
+            handles += [h for h in await _poe_web_handles(query, web_search) if h not in handles]
+            searched = True
+        except Exception as error:  # the engine's own errors vary; a lookup by name still works
+            log.info('Web search for Poe bots failed: %s', error)
     results = await asyncio.gather(*(_poe_bot(handle) for handle in handles), return_exceptions=True)
     items = []
     for handle, result in zip(handles, results):
@@ -629,7 +657,14 @@ async def _poe_search(query: str, page: int, sort: str, nsfw: bool, tags: TagFil
             log.info('Poe lookup of %s failed: %s', handle, result)
         else:
             items.append(_poe_summary(result))
-    if handles and not items:
+    if not items:
+        if searched:
+            raise SourceError('No Poe bots found for that search. Try other words, or paste bot links or names.')
+        if web_search is None and not any(marker in query for marker in ('poe.com', '/')):
+            raise SourceError(
+                'No Poe bot has that name. To search Poe by topic, turn on Web Search in Admin Settings: it '
+                'finds poe.com bots through your search engine. You can also paste bot links.'
+            )
         raise SourceError('None of those Poe bots could be found. Check the names or links.')
     return SearchPage(items=items, page=page, has_more=False)
 
@@ -1384,12 +1419,17 @@ async def search_cards(
     nsfw: bool = False,
     tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
+    web_search: WebSearch | None = None,
 ) -> SearchPage:
+    """``web_search`` (Open WebUI's configured engine, when on) finds Poe bots, which Poe itself only
+    lets its signed-in app search."""
     source = get_source(source_id)
     tag_filter = TagFilter(clean_tags(tags), clean_tags(exclude_tags)) if source.supports_tags else TagFilter()
-    result = await source.search(
-        query.strip()[:200], max(1, page), sort if sort in SORTS else 'popular', nsfw, tag_filter
-    )
+    args = (query.strip()[:200], max(1, page), sort if sort in SORTS else 'popular', nsfw, tag_filter)
+    if source.id == 'poe':
+        result = await source.search(*args, web_search=web_search)
+    else:
+        result = await source.search(*args)
     if source.tags_in_results and (tag_filter.include or tag_filter.exclude):
         # Sites apply tags their own way (or not at all); make sure every result matches.
         result.items = [item for item in result.items if tag_filter.matches(item.tags)]
