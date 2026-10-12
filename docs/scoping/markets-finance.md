@@ -130,13 +130,18 @@ Total for a usable paper-trading system (phases 1 to 3): roughly 6 to 8 weeks. P
 - **Regulatory (US).** The pattern day trader rule ended June 4 2026, but brokers may phase in until Oct 2027. Wash-sale tracking is needed for stocks and likely soon for crypto. Crypto venue availability is state-dependent (NY: Coinbase/Gemini only). Free data tiers are personal-use licences; keep the deployment single-user.
 - **Broker ops burden.** IBKR needs a gateway with daily restarts and weekly 2FA. Schwab needs a weekly manual login. Alpaca and Tradier do not, which is why they are first.
 
-## 7. Open questions for you
+## 7. Decisions (answered 2026-10-12)
 
-1. Which state are you in? It decides the crypto venue (and whether Alpaca crypto is available).
-2. Do you already have a brokerage account you want to use, or is opening an Alpaca account acceptable?
-3. Stocks and crypto only, or options too? Options add a multi-leg order model and OPRA data costs.
-4. Do you want strategies written in plain Python (vectorbt style) or in a constrained DSL the model fills in? Plain Python is more powerful; a DSL is safer to auto-generate.
-5. Is a freqtrade sidecar acceptable (Docker required) or should everything run inside this process?
+1. **State: Massachusetts.** Coinbase, Gemini and Kraken are all available. Check Alpaca crypto eligibility in the Alpaca dashboard when crypto is picked up.
+2. **Broker: Alpaca** (paper first, then live). No second broker for now.
+3. **Asset classes: US stocks/ETFs only.** Options and crypto are deferred, but the design keeps hooks for them:
+   - `asset_class` column (`us_equity` | `option` | `crypto`) on connections, orders, positions and strategies; only `us_equity` is enabled.
+   - Broker adapter protocol takes an `asset_class` and an order model that can later carry multiple legs (`legs: list[OrderLeg]`, one leg for stocks).
+   - `DataProvider` protocol has `option_chain()` and crypto symbol handling stubs that raise `NotImplementedError`.
+   - Provider registry so a CCXT/Coinbase adapter drops in without schema changes.
+4. **Strategy authoring: both.** A constrained template (indicators, entry/exit rules, sizing, stops as JSON) for model-generated strategies, which compiles to the same Python `Strategy` interface, plus plain Python for hand-written or advanced strategies. Templates are the default for "Ask the model"; raw Python needs explicit opt-in per strategy. Both run only in the worker process pool.
+5. **freqtrade sidecar: deferred** with crypto. Everything runs in-process (plus the worker pool) for now.
+6. **Data: Alpaca only.** Alpaca's free plan covers stock bars and quotes (IEX real-time, multi-year history), a market-data websocket, and news. Fundamentals come from SEC EDGAR, which is free and needs no account (only a User-Agent with an email). Massive, FMP and Tiingo stay optional adapters behind the same protocol and are not built in Phase 1.
 
 ## Appendix A: provider details
 
