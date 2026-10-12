@@ -1014,8 +1014,8 @@ JANNY_ID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 JANNY_SEARCH_HOST = 'search.jannyai.com'
 JANNY_UNAVAILABLE = (
-    'JannyAI search is not available from this server (its pages are behind bot protection, which '
-    'often blocks servers). Paste a JannyAI character link instead; importing by link may still work.'
+    'JannyAI’s bot protection blocked this server from reading its search setup. An admin can add the '
+    'site’s search key in Admin Settings > General (JannyAI search key) to search it anyway.'
 )
 JANNY_SCRIPT_RE = re.compile(r'<script[^>]+src=["\']([^"\']+\.js)["\']|["\'](/_(?:astro|next)/[^"\']+\.js)["\']')
 JANNY_KEY_RES = (
@@ -1100,8 +1100,16 @@ async def _janny_meili(path: str, key: str, payload: dict | None = None) -> tupl
 
 async def _janny_search_config() -> tuple[str, str]:
     """Find (and cache) the site's public search key and index, as its own pages use them."""
+    from open_webui.models.config import Config
+
+    configured_key = (await Config.get('characters.sources.janny.search_key') or '').strip()
+    configured_index = (await Config.get('characters.sources.janny.search_index') or '').strip()
     if _janny_config.get('key') and time.monotonic() - _janny_config.get('at', 0) < JANNY_CONFIG_TTL:
-        return _janny_config['key'], _janny_config['index']
+        if not configured_key or _janny_config['key'] == configured_key:
+            return _janny_config['key'], _janny_config['index']
+    if configured_key:
+        # Set by the admin (copied from the site in a browser): no need to read the protected pages.
+        return await _janny_pick_index(configured_key, configured_index)
     try:
         page = await _janny_text('https://jannyai.com/characters/search')
     except SourceError as error:
@@ -1122,6 +1130,11 @@ async def _janny_search_config() -> tuple[str, str]:
     if not key:
         log.info('JannyAI search key not found in %d scripts', len(scripts))
         raise SourceError(JANNY_UNAVAILABLE)
+    return await _janny_pick_index(key, index or '')
+
+
+async def _janny_pick_index(key: str, index: str) -> tuple[str, str]:
+    """The first index name that the key can search (the given one, then common names)."""
     candidates = [index] if index else []
     candidates += [guess for guess in JANNY_INDEX_GUESSES if guess not in candidates]
     for candidate in candidates:
@@ -1129,8 +1142,49 @@ async def _janny_search_config() -> tuple[str, str]:
         if status == 200:
             _janny_config.update(key=key, index=candidate, at=time.monotonic())
             return key, candidate
+        if status in (401, 403):
+            log.info('JannyAI search key was refused (%s)', status)
+            raise SourceError('JannyAI search refused the search key. Check it in Admin Settings > General.')
     log.info('JannyAI search index not found (tried %s)', candidates)
-    raise SourceError(JANNY_UNAVAILABLE)
+    raise SourceError(
+        'JannyAI search did not find its index. Set the index name in Admin Settings > General '
+        '(it is the "indexUid" in the site\'s search request).'
+    )
+
+
+# Recent search hits by character id: the index holds the definitions too, so a card can be built from
+# a hit when the site's download endpoint is blocked.
+_janny_hits: OrderedDict[str, dict] = OrderedDict()
+JANNY_HITS_MAX = 500
+
+
+def _janny_remember(card_id: str, hit: dict) -> None:
+    _janny_hits[card_id] = hit
+    _janny_hits.move_to_end(card_id)
+    while len(_janny_hits) > JANNY_HITS_MAX:
+        _janny_hits.popitem(last=False)
+
+
+def janny_card(hit: dict) -> dict | None:
+    """A V2 card from a search hit, when the hit carries the character's definition."""
+    definition = _text(_first(hit, 'personality', 'definition', 'persona'))
+    first_mes = _text(_first(hit, 'firstMessage', 'first_message', 'first_mes', 'greeting'))
+    if not definition and not first_mes:
+        return None
+    name = _text(_first(hit, 'name', 'displayName', 'characterName'))
+    summary = _janny_summary(hit)
+    tags = summary.tags if summary else []
+    return _v2_card(
+        name=name,
+        description=definition,
+        scenario=_text(_first(hit, 'scenario')),
+        first_mes=first_mes,
+        mes_example=_text(_first(hit, 'exampleDialogs', 'example_dialogs', 'exampleDialogue', 'mes_example')),
+        creator_notes=_text(_first(hit, 'description', 'tagline')),
+        creator=_text(_first(hit, 'creatorName', 'creator', 'authorName', 'username')),
+        tags=tags,
+        extensions={'jannyai_id': _text(_first(hit, 'id', 'characterId', 'uuid')).lower()},
+    )
 
 
 def _first(hit: dict, *names: str):
@@ -1193,7 +1247,12 @@ async def _janny_search(query: str, page: int, sort: str, nsfw: bool, tags: TagF
         raise SourceError(f'JannyAI search answered {status}.')
     result = (data.get('results') or [{}])[0] if isinstance(data.get('results'), list) else {}
     hits = result.get('hits') if isinstance(result, dict) else None
-    items = [item for hit in hits or [] if isinstance(hit, dict) and (item := _janny_summary(hit))]
+    items = []
+    for hit in hits or []:
+        item = _janny_summary(hit) if isinstance(hit, dict) else None
+        if item:
+            items.append(item)
+            _janny_remember(item.id, hit)
     if not nsfw:
         items = [item for item in items if not item.nsfw]
     total = result.get('estimatedTotalHits') or result.get('totalHits') or 0
@@ -1202,6 +1261,19 @@ async def _janny_search(query: str, page: int, sort: str, nsfw: bool, tags: TagF
 
 
 async def _janny_download(card_id: str) -> tuple[bytes, str]:
+    try:
+        return await _janny_download_card(card_id)
+    except SourceError as error:
+        hit = _janny_hits.get(card_id)
+        card = janny_card(hit) if hit else None
+        if card is None:
+            raise
+        # Blocked or failing: build the card from what the search returned.
+        log.info('JannyAI download failed (%s); using the search result for %s', error, card_id)
+        return await _card_file(card, _janny_summary(hit).image_url, ('image.jannyai.com',))
+
+
+async def _janny_download_card(card_id: str) -> tuple[bytes, str]:
     session = await get_session()
     try:
         async with session.post(

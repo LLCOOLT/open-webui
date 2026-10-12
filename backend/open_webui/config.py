@@ -2119,6 +2119,11 @@ ENABLE_CHARACTER_RECALL = os.getenv('ENABLE_CHARACTER_RECALL', 'True').lower() =
 # Empty uses the built-in prompt.
 CHARACTER_RECALL_PROMPT = os.getenv('CHARACTER_RECALL_PROMPT', '')
 
+# JannyAI's public search key (the one its own pages use) and index, for the card browser. Its pages
+# are behind bot protection that often blocks servers, so the key cannot always be read from them.
+JANNYAI_SEARCH_KEY = os.getenv('JANNYAI_SEARCH_KEY', '')
+JANNYAI_SEARCH_INDEX = os.getenv('JANNYAI_SEARCH_INDEX', '')
+
 ENABLE_USER_STATUS = os.getenv('ENABLE_USER_STATUS', 'True').lower() == 'true'
 
 ENABLE_EVALUATION_ARENA_MODELS = os.getenv('ENABLE_EVALUATION_ARENA_MODELS', 'False').lower() == 'true'
@@ -3236,6 +3241,8 @@ DEFAULT_CONFIG = {
     'characters.memory.prompt': CHARACTER_MEMORY_PROMPT,
     'characters.recall.enable': ENABLE_CHARACTER_RECALL,
     'characters.recall.prompt': CHARACTER_RECALL_PROMPT,
+    'characters.sources.janny.search_key': JANNYAI_SEARCH_KEY,
+    'characters.sources.janny.search_index': JANNYAI_SEARCH_INDEX,
     'users.enable_status': ENABLE_USER_STATUS,
     'evaluation.arena.enable': ENABLE_EVALUATION_ARENA_MODELS,
     'evaluation.arena.models': EVALUATION_ARENA_MODELS,

@@ -433,6 +433,27 @@
 							/>
 						</AdminSettingField>
 					{/if}
+					<AdminSettingField
+						label={$i18n.t('JannyAI search key')}
+						description={$i18n.t(
+							'JannyAI blocks servers from reading its search setup. To search it in the card browser, open jannyai.com/characters/search in your browser, open the developer tools (F12) > Network, search for anything, and select the "multi-search" request: copy the key after "Bearer" in its Authorization header, and the "indexUid" from its payload.'
+						)}
+					>
+						<div class="flex gap-2">
+							<input
+								class="{inputClass} flex-1 min-w-0"
+								placeholder={$i18n.t('Search key')}
+								autocomplete="off"
+								bind:value={adminConfig.JANNYAI_SEARCH_KEY}
+							/>
+							<input
+								class="{inputClass} w-44"
+								placeholder={$i18n.t('Index (optional)')}
+								autocomplete="off"
+								bind:value={adminConfig.JANNYAI_SEARCH_INDEX}
+							/>
+						</div>
+					</AdminSettingField>
 				{/if}
 				<AdminSettingRow
 					label={$i18n.t('settings.admin.general.channels.label')}

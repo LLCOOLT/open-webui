@@ -141,6 +141,8 @@ ADMIN_CONFIG_KEYS = {
     'CHARACTER_MEMORY_PROMPT': 'characters.memory.prompt',
     'ENABLE_CHARACTER_RECALL': 'characters.recall.enable',
     'CHARACTER_RECALL_PROMPT': 'characters.recall.prompt',
+    'JANNYAI_SEARCH_KEY': 'characters.sources.janny.search_key',
+    'JANNYAI_SEARCH_INDEX': 'characters.sources.janny.search_index',
     'ENABLE_USER_WEBHOOKS': 'ui.enable_user_webhooks',
     'ENABLE_USER_STATUS': 'users.enable_status',
     'PENDING_USER_OVERLAY_TITLE': 'ui.pending_user_overlay_title',
@@ -1198,6 +1200,8 @@ class AdminConfig(MfaConfigForm):
     CHARACTER_MEMORY_PROMPT: str | None = None
     ENABLE_CHARACTER_RECALL: bool | None = None
     CHARACTER_RECALL_PROMPT: str | None = None
+    JANNYAI_SEARCH_KEY: str | None = Field(default=None, max_length=256)
+    JANNYAI_SEARCH_INDEX: str | None = Field(default=None, max_length=64)
     ENABLE_USER_WEBHOOKS: bool
     ENABLE_USER_STATUS: bool
     PENDING_USER_OVERLAY_TITLE: str | None = None
@@ -1251,6 +1255,8 @@ async def update_admin_config(request: Request, form_data: AdminConfig, user=Dep
         ('CHARACTER_MEMORY_PROMPT', 'characters.memory.prompt'),
         ('ENABLE_CHARACTER_RECALL', 'characters.recall.enable'),
         ('CHARACTER_RECALL_PROMPT', 'characters.recall.prompt'),
+        ('JANNYAI_SEARCH_KEY', 'characters.sources.janny.search_key'),
+        ('JANNYAI_SEARCH_INDEX', 'characters.sources.janny.search_index'),
     ):
         if getattr(form_data, field) is None:
             updates.pop(key, None)

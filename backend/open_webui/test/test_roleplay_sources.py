@@ -680,3 +680,70 @@ def test_janny_hits_are_read_leniently():
     assert item.tags == ['Fantasy', 'Female'] and item.nsfw and item.tokens == 1200
     assert item.page_url == f'https://jannyai.com/characters/{JANNY_ID}_character-sera-the-elf'
     assert sources._janny_summary({'id': 'nope'}) is None
+
+
+async def test_janny_search_with_configured_key_and_import_from_hits(fake_get, monkeypatch):
+    from open_webui.models.config import Config
+
+    calls, responses = fake_get
+    monkeypatch.setattr(sources, '_janny_config', {})
+    monkeypatch.setattr(sources, '_janny_hits', OrderedDict())
+    await Config.upsert(
+        {'characters.sources.janny.search_key': 'browser-key', 'characters.sources.janny.search_index': ''}
+    )
+    meili = []
+    hit = {
+        'id': JANNY_ID,
+        'name': 'Sera',
+        'description': 'A forest guardian.',
+        'personality': '{{char}} guards the forest.',
+        'scenario': 'A glade.',
+        'firstMessage': 'Welcome, traveler.',
+        'exampleDialogs': '{{user}}: hi',
+        'avatar': 'sera.webp',
+        'tags': [{'name': 'Fantasy'}],
+        'isNsfw': False,
+    }
+
+    async def fake_meili(path, key, payload=None):
+        meili.append((key, payload))
+        index = payload['queries'][0]['indexUid']
+        if index != 'characters':  # the first guesses do not exist
+            return 404, {'message': 'index not found'}
+        return 200, {'results': [{'hits': [hit, {**hit, 'id': 'bad'}], 'estimatedTotalHits': 1}]}
+
+    monkeypatch.setattr(sources, '_janny_meili', fake_meili)
+    try:
+        page = await search_cards('janny', 'sera', 1, 'popular', False, ['fantasy'])
+        assert [item.name for item in page.items] == ['Sera']
+        assert all(key == 'browser-key' for key, _ in meili)
+        assert not any('jannyai.com/characters/search' in url for url in calls)  # the protected page is skipped
+        assert sources._janny_config['index'] == 'characters'
+
+        # The download endpoint is blocked: the card comes from the search result instead.
+        async def blocked(card_id):
+            raise SourceError('JannyAI’s bot protection blocked this server.')
+
+        monkeypatch.setattr(sources, '_janny_download_card', blocked)
+        responses['https://image.jannyai.com/bot-avatars/sera.webp'] = TINY_PNG
+        data, filename = await download_card('janny', JANNY_ID)
+        character = parse_card_bytes(data, filename).character
+        assert character.name == 'Sera' and character.description == '{{char}} guards the forest.'
+        assert character.first_mes == 'Welcome, traveler.' and character.scenario == 'A glade.'
+        assert character.creator_notes == 'A forest guardian.' and character.tags == ['Fantasy']
+
+        # Never searched: the download's own error stands.
+        with pytest.raises(SourceError, match='bot protection'):
+            await download_card('janny', '00000000-0000-4000-8000-000000000000')
+
+        # A refused key says so.
+        sources._janny_config.clear()
+
+        async def refused(path, key, payload=None):
+            return 403, {'message': 'invalid key'}
+
+        monkeypatch.setattr(sources, '_janny_meili', refused)
+        with pytest.raises(SourceError, match='refused the search key'):
+            await search_cards('janny', 'sera')
+    finally:
+        await Config.upsert({'characters.sources.janny.search_key': ''})
