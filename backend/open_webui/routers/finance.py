@@ -5,14 +5,25 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.models.config import Config
 from open_webui.models.finance import (
+    FinanceBacktestModel,
+    FinanceBacktests,
     FinanceConnectionForm,
     FinanceConnectionResponse,
     FinanceConnections,
+    FinanceStrategies,
+    FinanceStrategyForm,
+    FinanceStrategyModel,
+    FinanceStrategyVersionModel,
 )
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.auth import get_verified_user
 from open_webui.utils.finance import service
-from open_webui.utils.finance.base import FinanceProviderError, normalize_symbol
+from open_webui.utils.finance.backtest import runner as backtest_runner
+from open_webui.utils.finance.backtest.runner import BacktestRequest
+from open_webui.utils.finance.backtest.engine import BacktestError
+from open_webui.utils.finance.backtest.starters import PYTHON_STARTER, STARTER_TEMPLATES
+from open_webui.utils.finance.backtest.validate import StrategyValidateForm, validate_strategy
+from open_webui.utils.finance.base import TIMEFRAMES, FinanceProviderError, normalize_symbol
 
 log = logging.getLogger(__name__)
 
@@ -202,3 +213,129 @@ async def get_orders(
         return await broker.orders(status=status, limit=limit)
     except FinanceProviderError as e:
         raise provider_error(e)
+
+
+############################
+# Strategies
+############################
+
+
+def check_strategy_kind(form: FinanceStrategyForm, user) -> None:
+    # Python strategies execute arbitrary code on the server, same trust level as Tools/Functions.
+    if form.kind == 'python' and user.role != 'admin':
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Only admins can use Python strategies')
+    try:
+        validate_strategy(form.kind, form.definition, form.source, form.params)
+    except BacktestError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    if form.timeframe not in TIMEFRAMES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid timeframe')
+    try:
+        form.universe = list(dict.fromkeys(normalize_symbol(s) for s in form.universe))
+    except FinanceProviderError as e:
+        raise provider_error(e)
+
+
+async def get_owned_strategy(id: str, user) -> FinanceStrategyModel:
+    strategy = await FinanceStrategies.get_by_id(id)
+    if not strategy or strategy.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    return strategy
+
+
+@router.get('/strategies/templates')
+async def get_strategy_templates(user=Depends(finance_user)):
+    templates = list(STARTER_TEMPLATES)
+    if user.role == 'admin':
+        templates.append(
+            {
+                'id': 'python_blank',
+                'name': 'Python strategy',
+                'description': 'Write signals(df, params) in Python. Runs on the server (admin only).',
+                'kind': 'python',
+                'source': PYTHON_STARTER,
+                'params': {'fast': 20, 'slow': 50},
+                'timeframe': '1Day',
+                'universe': ['SPY'],
+            }
+        )
+    return templates
+
+
+@router.get('/strategies', response_model=list[FinanceStrategyModel])
+async def get_strategies(user=Depends(finance_user)):
+    return await FinanceStrategies.get_by_user(user.id)
+
+
+@router.post('/strategies/create', response_model=FinanceStrategyModel)
+async def create_strategy(form_data: FinanceStrategyForm, user=Depends(finance_user)):
+    check_strategy_kind(form_data, user)
+    return await FinanceStrategies.insert(user.id, form_data)
+
+
+@router.post('/strategies/validate')
+async def validate_strategy_route(form_data: StrategyValidateForm, user=Depends(finance_user)):
+    if form_data.kind == 'python' and user.role != 'admin':
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Only admins can use Python strategies')
+    try:
+        # Python source is only syntax-checked here; it is executed in the worker during backtests.
+        validate_strategy(form_data.kind, form_data.definition, form_data.source, form_data.params or {})
+        return {'ok': True}
+    except BacktestError as e:
+        return {'ok': False, 'error': str(e)}
+
+
+@router.get('/strategies/{id}', response_model=FinanceStrategyModel)
+async def get_strategy(id: str, user=Depends(finance_user)):
+    return await get_owned_strategy(id, user)
+
+
+@router.post('/strategies/{id}/update', response_model=FinanceStrategyModel)
+async def update_strategy(id: str, form_data: FinanceStrategyForm, user=Depends(finance_user)):
+    await get_owned_strategy(id, user)
+    check_strategy_kind(form_data, user)
+    return await FinanceStrategies.update_by_id(id, form_data)
+
+
+@router.get('/strategies/{id}/versions', response_model=list[FinanceStrategyVersionModel])
+async def get_strategy_versions(id: str, user=Depends(finance_user)):
+    await get_owned_strategy(id, user)
+    return await FinanceStrategies.get_versions(id)
+
+
+@router.delete('/strategies/{id}/delete')
+async def delete_strategy(id: str, user=Depends(finance_user)):
+    await get_owned_strategy(id, user)
+    return await FinanceStrategies.delete_by_id(id)
+
+
+############################
+# Backtests
+############################
+
+
+@router.post('/backtests/run', response_model=FinanceBacktestModel)
+async def run_backtest(form_data: BacktestRequest, user=Depends(finance_user)):
+    try:
+        return await backtest_runner.start(user, form_data)
+    except FinanceProviderError as e:
+        raise provider_error(e)
+
+
+@router.get('/backtests', response_model=list[FinanceBacktestModel])
+async def get_backtests(strategy_id: Optional[str] = None, limit: int = 50, user=Depends(finance_user)):
+    return await FinanceBacktests.get_by_user(user.id, strategy_id=strategy_id, limit=max(1, min(limit, 200)))
+
+
+@router.get('/backtests/{id}', response_model=FinanceBacktestModel)
+async def get_backtest(id: str, user=Depends(finance_user)):
+    backtest = await FinanceBacktests.get_by_id(id)
+    if not backtest or backtest.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    return backtest
+
+
+@router.delete('/backtests/{id}/delete')
+async def delete_backtest(id: str, user=Depends(finance_user)):
+    await get_backtest(id, user)
+    return await FinanceBacktests.delete_by_id(id)

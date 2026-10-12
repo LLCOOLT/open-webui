@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getContext, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 
 	import { config, mobile, showSidebar, user } from '$lib/stores';
 	import type i18nType from '$lib/i18n';
@@ -10,6 +11,21 @@
 	const i18n: typeof i18nType = getContext('i18n');
 
 	let allowed = false;
+
+	$: path = $page.url.pathname;
+	$: navItems = [
+		{ href: '/markets', label: $i18n.t('Overview'), active: path === '/markets' },
+		{
+			href: '/markets/strategies',
+			label: $i18n.t('Strategies'),
+			active: path.startsWith('/markets/strategies')
+		},
+		{
+			href: '/markets/backtests',
+			label: $i18n.t('Backtests'),
+			active: path.startsWith('/markets/backtests')
+		}
+	];
 
 	onMount(() => {
 		if (
@@ -52,6 +68,18 @@
 
 				<div class="flex w-full min-w-0 items-center py-1">
 					<span class="min-w-fit px-1 text-sm select-none">{$i18n.t('Markets')}</span>
+					<nav class="ml-2 flex items-center gap-1 overflow-x-auto text-sm">
+						{#each navItems as item (item.href)}
+							<a
+								href={item.href}
+								class="rounded-full px-2.5 py-0.5 transition {item.active
+									? 'bg-gray-100 dark:bg-gray-850 text-gray-900 dark:text-white'
+									: 'text-gray-500 hover:text-gray-900 dark:hover:text-white'}"
+							>
+								{item.label}
+							</a>
+						{/each}
+					</nav>
 				</div>
 			</div>
 		</div>

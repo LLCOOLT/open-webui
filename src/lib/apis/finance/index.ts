@@ -253,3 +253,194 @@ export const getFinanceOrders = async (
 
 export const getFinanceNews = async (token: string, symbols: string[] = [], limit: number = 10) =>
 	request<FinanceNewsItem[]>(token, `/news${buildQuery({ symbols: symbols.join(','), limit })}`);
+
+// ---------------------------------------------------------------------------
+// Strategies & backtests (Phase 2)
+// ---------------------------------------------------------------------------
+
+export type FinanceStrategyKind = 'template' | 'python';
+
+export type FinanceStrategy = {
+	id: string;
+	user_id: string;
+	name: string;
+	description: string;
+	kind: FinanceStrategyKind;
+	definition: Record<string, unknown> | null;
+	source: string | null;
+	params: Record<string, number>;
+	timeframe: FinanceTimeframe;
+	universe: string[];
+	version: number;
+	meta: Record<string, unknown> | null;
+	created_at: number;
+	updated_at: number;
+};
+
+export type FinanceStrategyTemplate = {
+	id: string;
+	name: string;
+	description: string;
+	kind: 'template';
+	definition: Record<string, unknown>;
+	params: Record<string, number>;
+	timeframe: FinanceTimeframe;
+	universe: string[];
+};
+
+export type FinanceStrategyForm = {
+	name: string;
+	description: string;
+	kind: FinanceStrategyKind;
+	definition?: Record<string, unknown> | null;
+	source?: string | null;
+	params: Record<string, number>;
+	timeframe: FinanceTimeframe;
+	universe: string[];
+	meta?: Record<string, unknown> | null;
+};
+
+export type FinanceStrategyVersion = {
+	version: number;
+	definition: Record<string, unknown> | null;
+	source: string | null;
+	params: Record<string, number>;
+	created_at: number;
+};
+
+export type FinanceValidateResult = { ok: boolean; error?: string };
+
+export type FinanceBacktestMetrics = {
+	total_return: number | null;
+	cagr: number | null;
+	sharpe: number | null;
+	sortino: number | null;
+	max_drawdown: number | null;
+	win_rate: number | null;
+	profit_factor: number | null;
+	trades: number | null;
+	exposure: number | null;
+	avg_trade_return: number | null;
+	final_equity: number | null;
+};
+
+export type FinancePoint = { t: number; v: number };
+
+export type FinanceBacktestTrade = {
+	symbol: string;
+	entry_t: number;
+	entry_price: number;
+	exit_t: number | null;
+	exit_price: number | null;
+	qty: number;
+	return_pct: number | null;
+	pnl: number | null;
+	exit_reason: string | null;
+};
+
+export type FinanceBacktestResult = {
+	equity: FinancePoint[];
+	benchmark_equity: FinancePoint[];
+	trades: FinanceBacktestTrade[];
+	per_symbol: Record<
+		string,
+		{ metrics: FinanceBacktestMetrics | null; benchmark: FinanceBacktestMetrics | null }
+	>;
+	grid?: { params: Record<string, number>; metrics: FinanceBacktestMetrics | null }[];
+	best_params?: Record<string, number> | null;
+};
+
+export type FinanceBacktestConfig = {
+	symbols: string[];
+	timeframe: FinanceTimeframe;
+	start: string | null;
+	end: string | null;
+	params: Record<string, number>;
+	grid?: Record<string, number[]> | null;
+	initial_cash: number;
+	commission_bps: number;
+	slippage_bps: number;
+};
+
+export type FinanceBacktestStatus = 'queued' | 'running' | 'completed' | 'failed';
+
+export type FinanceBacktest = {
+	id: string;
+	user_id: string;
+	strategy_id: string | null;
+	strategy_version: number | null;
+	name: string;
+	config: FinanceBacktestConfig;
+	status: FinanceBacktestStatus;
+	error: string | null;
+	metrics: FinanceBacktestMetrics | null;
+	benchmark: FinanceBacktestMetrics | null;
+	result?: FinanceBacktestResult | null;
+	created_at: number;
+	updated_at: number;
+	completed_at: number | null;
+};
+
+export type FinanceBacktestRunForm = {
+	strategy_id?: string | null;
+	definition?: Record<string, unknown> | null;
+	symbols: string[];
+	timeframe?: FinanceTimeframe;
+	start?: string | null;
+	end?: string | null;
+	params?: Record<string, number>;
+	grid?: Record<string, number[]> | null;
+	initial_cash?: number;
+	commission_bps?: number;
+	slippage_bps?: number;
+};
+
+export const getFinanceStrategyTemplates = async (token: string) =>
+	request<FinanceStrategyTemplate[]>(token, '/strategies/templates');
+
+export const getFinanceStrategies = async (token: string) =>
+	request<FinanceStrategy[]>(token, '/strategies');
+
+export const createFinanceStrategy = async (token: string, form: FinanceStrategyForm) =>
+	request<FinanceStrategy>(token, '/strategies/create', 'POST', form);
+
+export const getFinanceStrategyById = async (token: string, id: string) =>
+	request<FinanceStrategy>(token, `/strategies/${encodeURIComponent(id)}`);
+
+export const updateFinanceStrategyById = async (
+	token: string,
+	id: string,
+	form: FinanceStrategyForm
+) => request<FinanceStrategy>(token, `/strategies/${encodeURIComponent(id)}/update`, 'POST', form);
+
+export const getFinanceStrategyVersions = async (token: string, id: string) =>
+	request<FinanceStrategyVersion[]>(token, `/strategies/${encodeURIComponent(id)}/versions`);
+
+export const deleteFinanceStrategyById = async (token: string, id: string) =>
+	request<boolean>(token, `/strategies/${encodeURIComponent(id)}/delete`, 'DELETE');
+
+export const validateFinanceStrategy = async (
+	token: string,
+	body: {
+		kind: FinanceStrategyKind;
+		definition?: Record<string, unknown> | null;
+		source?: string | null;
+		params?: Record<string, number>;
+	}
+) => request<FinanceValidateResult>(token, '/strategies/validate', 'POST', body);
+
+export const runFinanceBacktest = async (token: string, form: FinanceBacktestRunForm) =>
+	request<FinanceBacktest>(token, '/backtests/run', 'POST', form);
+
+export const getFinanceBacktests = async (
+	token: string,
+	strategyId?: string | null,
+	limit?: number | null
+) =>
+	request<FinanceBacktest[]>(token, `/backtests${buildQuery({ strategy_id: strategyId, limit })}`);
+
+export const getFinanceBacktestById = async (token: string, id: string) =>
+	request<FinanceBacktest>(token, `/backtests/${encodeURIComponent(id)}`);
+
+export const deleteFinanceBacktestById = async (token: string, id: string) =>
+	request<boolean>(token, `/backtests/${encodeURIComponent(id)}/delete`, 'DELETE');

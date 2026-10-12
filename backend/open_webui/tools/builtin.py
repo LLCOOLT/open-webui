@@ -4759,3 +4759,223 @@ async def get_orders(
         return await broker.orders(status=status, limit=limit)
 
     return await _finance_call('get_orders', run, __user__)
+
+
+def _backtest_summary(backtest) -> dict:
+    result = backtest.result or {}
+    trades = result.get('trades') or []
+    summary = {
+        'backtest_id': backtest.id,
+        'name': backtest.name,
+        'status': backtest.status,
+        'error': backtest.error,
+        'config': backtest.config,
+        'metrics': backtest.metrics,
+        'buy_and_hold_benchmark': backtest.benchmark,
+        'per_symbol': result.get('per_symbol'),
+        'trade_count': len(trades),
+        'recent_trades': trades[-10:],
+    }
+    if result.get('grid'):
+        summary['best_params'] = result.get('best_params')
+        summary['grid_top'] = result['grid'][:10]
+        summary['grid_size'] = len(result['grid'])
+        summary['note'] = 'Best params were chosen in-sample by Sharpe; validate on a later, unseen period before trusting them.'
+    if backtest.status in ('queued', 'running'):
+        summary['note'] = 'Still running; call get_backtest_result with this backtest_id shortly.'
+    return summary
+
+
+async def list_strategies(
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    List the user's saved trading strategies.
+
+    :return: JSON list of {id, name, description, kind, params, timeframe, universe, version}
+    """
+
+    async def run(user_id):
+        from open_webui.models.finance import FinanceStrategies
+
+        return [
+            {
+                k: getattr(s, k)
+                for k in ('id', 'name', 'description', 'kind', 'params', 'timeframe', 'universe', 'version')
+            }
+            for s in await FinanceStrategies.get_by_user(user_id)
+        ]
+
+    return await _finance_call('list_strategies', run, __user__)
+
+
+async def get_strategy(
+    strategy_id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Get a saved strategy including its template definition (or Python source) and default params.
+
+    :param strategy_id: The strategy id from list_strategies
+    :return: JSON strategy
+    """
+
+    async def run(user_id):
+        from open_webui.models.finance import FinanceStrategies
+        from open_webui.utils.finance.base import FinanceProviderError
+
+        strategy = await FinanceStrategies.get_by_id(strategy_id)
+        if not strategy or strategy.user_id != user_id:
+            raise FinanceProviderError('Strategy not found', status_code=404)
+        return strategy.model_dump(exclude={'user_id'})
+
+    return await _finance_call('get_strategy', run, __user__)
+
+
+async def save_strategy(
+    name: str,
+    definition: dict,
+    params: Optional[dict] = None,
+    description: Optional[str] = None,
+    timeframe: str = '1Day',
+    universe: Optional[list[str]] = None,
+    strategy_id: Optional[str] = None,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Create a template strategy, or update one when strategy_id is given (a new version is kept).
+    Template format: {"direction": "long", "indicators": [{"id": "fast", "type": "ema", "period": "$fast"}],
+    "entry": {"all": [{"left": "fast", "op": "crosses_above", "right": "slow"}]},
+    "exit": {"any": [...]}, "stop_loss_pct": null, "take_profit_pct": null, "position_size_pct": 100}.
+    Indicator types: sma, ema, rsi, roc, highest, lowest, atr (period), bbands (period, std; outputs id.upper/id.middle/id.lower),
+    macd (fast, slow, signal; outputs id.macd/id.signal/id.hist). Price series: open, high, low, close, volume.
+    ops: >, <, >=, <=, crosses_above, crosses_below. "right" is a series id or a number. "$name" reads params[name].
+    Signals fire on a bar's close and fill at the next bar's open.
+
+    :param name: Strategy name
+    :param definition: Template definition object (see format above)
+    :param params: Default numeric parameters, e.g. {"fast": 20, "slow": 50}
+    :param description: What the strategy does and why
+    :param timeframe: Bar timeframe: 1Min, 5Min, 15Min, 1Hour, 1Day, 1Week (default 1Day)
+    :param universe: Default symbols, e.g. ["SPY"]
+    :param strategy_id: Existing strategy to update (optional)
+    :return: JSON with the saved strategy id and version, or a validation error
+    """
+
+    async def run(user_id):
+        from open_webui.models.finance import FinanceStrategies, FinanceStrategyForm
+        from open_webui.utils.finance.backtest.engine import BacktestError
+        from open_webui.utils.finance.backtest.validate import validate_strategy
+        from open_webui.utils.finance.base import TIMEFRAMES, FinanceProviderError, normalize_symbol
+
+        if timeframe not in TIMEFRAMES:
+            raise FinanceProviderError(f'timeframe must be one of {", ".join(TIMEFRAMES)}')
+        form = FinanceStrategyForm(
+            name=name,
+            description=description,
+            kind='template',
+            definition=definition,
+            params=params or {},
+            timeframe=timeframe,
+            universe=[normalize_symbol(s) for s in (universe or ['SPY'])],
+        )
+        try:
+            validate_strategy('template', form.definition, None, form.params)
+        except BacktestError as e:
+            raise FinanceProviderError(f'Invalid template: {e}')
+
+        if strategy_id:
+            existing = await FinanceStrategies.get_by_id(strategy_id)
+            if not existing or existing.user_id != user_id:
+                raise FinanceProviderError('Strategy not found')
+            if existing.kind != 'template':
+                raise FinanceProviderError('Only template strategies can be edited from chat')
+            saved = await FinanceStrategies.update_by_id(strategy_id, form)
+        else:
+            saved = await FinanceStrategies.insert(user_id, form)
+        return {'strategy_id': saved.id, 'version': saved.version, 'name': saved.name}
+
+    return await _finance_call('save_strategy', run, __user__)
+
+
+async def run_backtest(
+    strategy_id: Optional[str] = None,
+    definition: Optional[dict] = None,
+    symbols: Optional[list[str]] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    params: Optional[dict] = None,
+    grid: Optional[dict] = None,
+    initial_cash: float = 10000,
+    commission_bps: float = 0,
+    slippage_bps: float = 5,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Backtest a saved strategy (strategy_id) or an inline template definition on historical bars.
+    Every result includes a buy-and-hold benchmark over the same period. Signals fill at the next bar's open.
+
+    :param strategy_id: Saved strategy id (or pass definition instead)
+    :param definition: Inline template definition (same format as save_strategy) when not using a saved strategy
+    :param symbols: Symbols to test, e.g. ["QQQ"]; cash is split equally (default: the strategy's universe)
+    :param start: Start date "YYYY-MM-DD" (default: 5 years ago)
+    :param end: End date "YYYY-MM-DD" (default: today)
+    :param timeframe: Override the bar timeframe
+    :param params: Parameter overrides, e.g. {"fast": 10}
+    :param grid: Parameter sweep, e.g. {"fast": [10, 20], "slow": [50, 100]} (max 200 combinations; ranked by Sharpe)
+    :param initial_cash: Starting cash (default 10000)
+    :param commission_bps: Commission per side in basis points (default 0)
+    :param slippage_bps: Slippage per side in basis points (default 5)
+    :return: JSON with backtest_id, metrics, buy_and_hold_benchmark, per-symbol results and recent trades
+    """
+    from types import SimpleNamespace
+
+    async def run(user_id):
+        from open_webui.utils.finance.backtest.runner import BacktestRequest, start_and_wait
+
+        form = BacktestRequest(
+            strategy_id=strategy_id,
+            definition=definition,
+            symbols=symbols,
+            start=start,
+            end=end,
+            timeframe=timeframe,
+            params=params,
+            grid=grid,
+            initial_cash=initial_cash,
+            commission_bps=commission_bps,
+            slippage_bps=slippage_bps,
+        )
+        user = SimpleNamespace(id=user_id, role=__user__.get('role'))
+        return _backtest_summary(await start_and_wait(user, form, wait=120))
+
+    return await _finance_call('run_backtest', run, __user__)
+
+
+async def get_backtest_result(
+    backtest_id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Get the status and results of a backtest.
+
+    :param backtest_id: The id returned by run_backtest
+    :return: JSON with status, metrics, buy_and_hold_benchmark, per-symbol results and recent trades
+    """
+
+    async def run(user_id):
+        from open_webui.models.finance import FinanceBacktests
+        from open_webui.utils.finance.base import FinanceProviderError
+
+        backtest = await FinanceBacktests.get_by_id(backtest_id)
+        if not backtest or backtest.user_id != user_id:
+            raise FinanceProviderError('Backtest not found', status_code=404)
+        return _backtest_summary(backtest)
+
+    return await _finance_call('get_backtest_result', run, __user__)

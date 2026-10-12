@@ -45,6 +45,7 @@ from open_webui.models.groups import Groups
 from open_webui.models.tools import Tools
 from open_webui.models.users import UserModel
 from open_webui.tools.builtin import (
+    get_backtest_result,
     get_bars,
     get_filings,
     get_fundamentals,
@@ -52,6 +53,10 @@ from open_webui.tools.builtin import (
     get_orders,
     get_portfolio,
     get_quote,
+    get_strategy,
+    list_strategies,
+    run_backtest,
+    save_strategy,
     search_symbols,
     add_memory,
     ask_user,
@@ -777,6 +782,11 @@ async def get_builtin_tools(
                 get_filings,
                 get_portfolio,
                 get_orders,
+                list_strategies,
+                get_strategy,
+                save_strategy,
+                run_backtest,
+                get_backtest_result,
             ]
         )
 
