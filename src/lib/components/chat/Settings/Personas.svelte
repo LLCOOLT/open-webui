@@ -77,7 +77,7 @@
 <UserSettingSection title={$i18n.t('Roleplay Personas')}>
 	<div class="text-xs text-gray-500 mb-2">
 		{$i18n.t(
-			'Who you are in roleplay chats. Characters call you by the persona’s name and read its description. Pick one per chat in Chat Controls.'
+			'Who you are in roleplay chats. Characters call you by the persona’s name and read its description. Pick one per chat from the input bar or Chat Controls.'
 		)}
 	</div>
 

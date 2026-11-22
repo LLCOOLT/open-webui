@@ -95,3 +95,32 @@ describe('previewCharacterFile', () => {
 		expect(nameless.error).toBeTruthy();
 	});
 });
+
+describe('looksLikeCharacterCard', async () => {
+	const { looksLikeCharacterCard } = await import('./index');
+
+	it('recognizes labelled card text', () => {
+		expect(
+			looksLikeCharacterCard(
+				'**Name:** Mara\n**Personality:** Dry humour\n**First Message:** *She nods.*'
+			)
+		).toBe(true);
+		expect(looksLikeCharacterCard('## Scenario\nA ship.\n\n## Personality\nLoyal.')).toBe(true);
+	});
+
+	it('recognizes pasted card JSON', () => {
+		expect(
+			looksLikeCharacterCard(
+				'```json\n{"spec":"chara_card_v2","data":{"name":"Kai","first_mes":"Hi"}}\n```'
+			)
+		).toBe(true);
+		expect(looksLikeCharacterCard('{"name":"Ana","personality":"shy"}')).toBe(true);
+	});
+
+	it('leaves ordinary prompts alone', () => {
+		expect(looksLikeCharacterCard('You are a helpful assistant. Answer briefly.')).toBe(false);
+		expect(looksLikeCharacterCard('Name: Support bot\nAlways be polite.')).toBe(false);
+		expect(looksLikeCharacterCard('Return JSON like {"name": "x"}')).toBe(false);
+		expect(looksLikeCharacterCard('')).toBe(false);
+	});
+});

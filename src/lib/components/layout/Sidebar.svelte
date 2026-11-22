@@ -79,6 +79,7 @@
 	import { createNewNote, getPinnedNoteList, toggleNotePinnedStatusById } from '$lib/apis/notes';
 	import { updateUserSettings } from '$lib/apis/users';
 	import { createNoteHandler } from '$lib/components/notes/utils';
+	import FaceSmile from '$lib/components/icons/FaceSmile.svelte';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 
 	import InboxButton from './InboxButton.svelte';
@@ -317,7 +318,12 @@
 		folderRegistry[folder.id]?.setFolderItems?.(false, false);
 	};
 
-	$: pinnedItems = $settings?.pinnedMenuItems ?? DEFAULT_PINNED_ITEMS;
+	// Characters is pinned by default where character cards are on.
+	$: pinnedItems =
+		$settings?.pinnedMenuItems ??
+		($config?.features?.enable_character_cards
+			? ['characters', ...DEFAULT_PINNED_ITEMS]
+			: DEFAULT_PINNED_ITEMS);
 
 	$: isMenuItemVisible = (id) => {
 		switch (id) {
@@ -347,6 +353,8 @@
 				);
 			case 'playground':
 				return $user?.role === 'admin';
+			case 'characters':
+				return $config?.features?.enable_character_cards ?? false;
 			default:
 				return false;
 		}
@@ -358,7 +366,8 @@
 			workspace: { label: $i18n.t('Workspace'), href: '/workspace', iconType: 'workspace' },
 			automations: { label: $i18n.t('Automations'), href: '/automations', iconType: 'automations' },
 			calendar: { label: $i18n.t('Calendar'), href: '/calendar', iconType: 'calendar' },
-			playground: { label: $i18n.t('Playground'), href: '/playground', iconType: 'playground' }
+			playground: { label: $i18n.t('Playground'), href: '/playground', iconType: 'playground' },
+			characters: { label: $i18n.t('Characters'), href: '/characters', iconType: 'characters' }
 		};
 		return items[id];
 	};
@@ -368,7 +377,8 @@
 		workspace: '/workspace',
 		calendar: '/calendar',
 		automations: '/automations',
-		playground: '/playground'
+		playground: '/playground',
+		characters: '/characters'
 	};
 
 	const getActiveMenuItemId = (pathname) => {
@@ -1323,6 +1333,8 @@
 												<CalendarIcon className="size-4" strokeWidth="1.5" />
 											{:else if itemId === 'playground'}
 												<CodeIcon className="size-4" strokeWidth="1.5" />
+											{:else if itemId === 'characters'}
+												<FaceSmile className="size-4" strokeWidth="1.5" />
 											{/if}
 										</div>
 									</a>
@@ -1568,6 +1580,8 @@
 													<CalendarIcon className="size-4" strokeWidth="1.5" />
 												{:else if itemId === 'playground'}
 													<CodeIcon className="size-4" strokeWidth="1.5" />
+												{:else if itemId === 'characters'}
+													<FaceSmile className="size-4" strokeWidth="1.5" />
 												{/if}
 											</div>
 

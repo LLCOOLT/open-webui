@@ -376,7 +376,11 @@
 				class="pointer-events-none absolute -inset-x-8 -inset-y-3 rounded-[3rem] bg-white/40 blur-2xl dark:bg-gray-900/40"
 			></div>
 			<div class="relative">
-				{@render composer($i18n.t('How can I help you today?'))}
+				{@render composer(
+					selectedModel?.info?.meta?.character
+						? $i18n.t('Say something to {{NAME}}…', { NAME: selectedModelName })
+						: $i18n.t('How can I help you today?')
+				)}
 			</div>
 		</div>
 

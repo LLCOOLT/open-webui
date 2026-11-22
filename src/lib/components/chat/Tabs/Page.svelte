@@ -99,7 +99,8 @@
 		'/playground': () => import('$lib/components/playground/Chat.svelte'),
 		'/playground/completions': () => import('$lib/components/playground/Completions.svelte'),
 		'/playground/images': () => import('$lib/components/playground/Images.svelte'),
-		'/home': () => import('$lib/components/home/Home.svelte')
+		'/home': () => import('$lib/components/home/Home.svelte'),
+		'/characters': () => import('$lib/components/characters/Characters.svelte')
 	};
 	$: path = $url.pathname.replace(/\/$/, '');
 	$: parts = path.split('/');
@@ -133,6 +134,7 @@
 			($config?.features?.enable_channels &&
 				($user?.role === 'admin' || ($user?.permissions?.features?.channels ?? true)))) &&
 		(parts[1] !== 'playground' || $user?.role === 'admin') &&
+		(parts[1] !== 'characters' || ($config?.features?.enable_character_cards ?? false)) &&
 		(parts[1] !== 'workspace' ||
 			!parts[2] ||
 			(($user?.role === 'admin' || $user?.permissions?.workspace?.[parts[2]]) &&

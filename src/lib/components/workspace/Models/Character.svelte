@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getContext } from 'svelte';
+	import { getContext, tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
 	import {
@@ -10,6 +10,7 @@
 		uploadCharacterExpressions
 	} from '$lib/apis/models';
 	import { config, user } from '$lib/stores';
+	import { looksLikeCharacterCard } from '$lib/utils/characters';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 
 	import Switch from '$lib/components/common/Switch.svelte';
@@ -138,6 +139,10 @@
 				...current,
 				...Object.fromEntries(CARD_TEXT_FIELDS.map((key) => [key, converted[key] ?? ''])),
 				name: converted.name || current.name,
+				...(converted.alternate_greetings?.length
+					? { alternate_greetings: converted.alternate_greetings }
+					: {}),
+				...(converted.tags?.length ? { tags: converted.tags } : {}),
 				prompt_overrides: {
 					...current.prompt_overrides,
 					system_prompt: converted.prompt_overrides?.system_prompt ?? 'replace'
@@ -156,6 +161,15 @@
 		} finally {
 			converting = null;
 		}
+	};
+
+	// A card pasted into the system prompt of a plain model: offer to make it a character.
+	$: pastedCard = !enabled && convertible && looksLikeCharacterCard(sourcePrompt);
+
+	const makeCharacterFromPrompt = async () => {
+		enabled = true;
+		await tick();
+		await convert(false);
 	};
 
 	const undoConversion = () => {
@@ -389,6 +403,27 @@
 		</div>
 		<Switch bind:state={enabled} ariaLabel={$i18n.t('This model is a character')} />
 	</div>
+
+	{#if pastedCard}
+		<div
+			class="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-blue-50 dark:bg-blue-400/10 px-3 py-2 text-xs text-blue-900 dark:text-blue-100"
+		>
+			<div>
+				{$i18n.t(
+					'The system prompt looks like a character card. Make this model a character so its greetings, memory and roleplay features work?'
+				)}
+			</div>
+			<button
+				type="button"
+				class="px-2.5 py-1 rounded-lg bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-1 disabled:opacity-50"
+				disabled={converting !== null}
+				on:click={makeCharacterFromPrompt}
+			>
+				{#if converting}<Spinner className="size-3" />{/if}
+				{$i18n.t('Make it a character')}
+			</button>
+		</div>
+	{/if}
 
 	{#if enabled && character}
 		{#if conversionSource.trim()}

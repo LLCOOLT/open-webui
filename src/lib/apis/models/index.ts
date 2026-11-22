@@ -518,8 +518,26 @@ export const getCharacterGreetings = async (token: string, id: string): Promise<
 export const convertSystemPromptToCharacter = async (
 	token: string,
 	form: { system: string; name?: string; base_model_id?: string | null; use_ai?: boolean }
-): Promise<{ character: Record<string, any>; detected: string[]; method: 'parser' | 'ai' }> => {
+): Promise<{
+	character: Record<string, any>;
+	detected: string[];
+	method: 'parser' | 'ai' | 'card';
+}> => {
 	const response = await fetch(`${WEBUI_API_BASE_URL}/models/characters/convert`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
+		body: JSON.stringify(form)
+	});
+	if (!response.ok) throw await response.json();
+	return response.json();
+};
+
+// Create a character model from reviewed card fields (e.g. pasted text read by the convert endpoint).
+export const createCharacter = async (
+	token: string,
+	form: { base_model_id: string; character: Record<string, any>; public?: boolean }
+) => {
+	const response = await fetch(`${WEBUI_API_BASE_URL}/models/characters/create`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
 		body: JSON.stringify(form)

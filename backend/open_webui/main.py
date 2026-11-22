@@ -910,11 +910,13 @@ async def get_models(
         meta = info.get('meta') if isinstance(info.get('meta'), dict) else {}
 
         # Leave profile images out; this model list is traveling light.
-        meta.pop('profile_image_url', None)
+        profile_image = meta.pop('profile_image_url', None)
 
         if isinstance(meta.get('character'), dict):
-            # Copy: chat requests read the full character from the shared app-state entry.
-            meta = {**meta, 'character': character_summary(meta['character'])}
+            # Copy: chat requests read the full character from the shared app-state entry. Whether
+            # it has a picture of its own lets galleries show a placeholder instead of the app logo.
+            has_avatar = isinstance(profile_image, str) and bool(profile_image) and 'favicon' not in profile_image
+            meta = {**meta, 'character': {**character_summary(meta['character']), 'has_avatar': has_avatar}}
             model = models[index] = {**model, 'info': {**info, 'meta': meta}}
 
         if 'tags' in meta:

@@ -1041,7 +1041,8 @@
 		</div>
 	{/if}
 
-	{#if $config?.features?.enable_character_cards}
+	<!-- Personal roleplay preferences live in Settings > Roleplay; here only as admin defaults. -->
+	{#if $config?.features?.enable_character_cards && externalSettings}
 		<div>
 			<div class={settingRowClass}>
 				<div id="roleplay-formatting-label" class={settingLabelClass}>

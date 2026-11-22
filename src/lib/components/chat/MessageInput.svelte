@@ -108,6 +108,7 @@
 	import Image from '../common/Image.svelte';
 	import Spinner from '../common/Spinner.svelte';
 	import ArrowPath from '../icons/ArrowPath.svelte';
+	import PersonaChip from './MessageInput/PersonaChip.svelte';
 
 	import XMark from '../icons/XMark.svelte';
 	import GlobeAlt from '../icons/GlobeAlt.svelte';
@@ -3025,6 +3026,7 @@
 										{/if}
 
 										{#if $config?.features?.enable_character_cards && selectedModels.length === 1 && ($models.find((model) => model.id === selectedModels[0]) as any)?.info?.meta?.character}
+											<PersonaChip />
 											<Tooltip
 												content={$i18n.t(
 													'Out of character: talk to the storyteller about the roleplay instead of to the character'

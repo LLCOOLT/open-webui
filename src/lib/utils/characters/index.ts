@@ -161,3 +161,44 @@ export const previewCharacterFile = async (file: File): Promise<CharacterPreview
 export const revokePreviewImage = (preview: CharacterPreview) => {
 	if (preview.image) URL.revokeObjectURL(preview.image);
 };
+
+// Labels that mark a character card rather than an ordinary system prompt ("Name:", "## Personality",
+// "**First message:**", "[Scenario]", "<example dialogue>").
+const CARD_LABEL_RE =
+	/^\s*(?:#{1,6}\s*)?(?:\*\*|__|\[|<)?\s*(name|character name|personality|scenario|first message|first mes|greeting|example dialogues?|example messages|alternate greetings|appearance|description)\s*(?:\*\*|__|\]|>)?\s*:?/gim;
+
+/** Whether pasted text looks like a character card (card JSON, or several card section labels). */
+export const looksLikeCharacterCard = (text: string): boolean => {
+	if (!text?.trim()) return false;
+	const start = text.indexOf('{');
+	const end = text.lastIndexOf('}');
+	if (start >= 0 && end > start) {
+		try {
+			const data = JSON.parse(text.slice(start, end + 1));
+			const card = data?.data ?? data;
+			if (
+				typeof card?.name === 'string' &&
+				['first_mes', 'personality', 'scenario', 'mes_example', 'description'].some(
+					(key) => typeof card?.[key] === 'string'
+				)
+			) {
+				return true;
+			}
+		} catch {
+			// Not JSON; look for labels.
+		}
+	}
+	const labels = new Set(
+		[...text.matchAll(CARD_LABEL_RE)].map((match) => match[1].toLowerCase().replace(/s$/, ''))
+	);
+	// "Name" alone is common in normal prompts; a card has the roleplay sections too.
+	const roleplay = [
+		'personality',
+		'scenario',
+		'first message',
+		'first me',
+		'greeting',
+		'example dialogue'
+	];
+	return labels.size >= 3 || (labels.size >= 2 && roleplay.some((label) => labels.has(label)));
+};

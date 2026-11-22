@@ -26,6 +26,7 @@
 	import Usage from './Settings/Usage.svelte';
 	import ArchivedChats from './Settings/ArchivedChats.svelte';
 	import Personalization from './Settings/Personalization.svelte';
+	import Roleplay from './Settings/Roleplay.svelte';
 	import Search from '../icons/Search.svelte';
 	import DatabaseSettings from '../icons/DatabaseSettings.svelte';
 	import SettingsAlt from '../icons/SettingsAlt.svelte';
@@ -33,6 +34,7 @@
 	import SoundHigh from '../icons/SoundHigh.svelte';
 	import InfoCircle from '../icons/InfoCircle.svelte';
 	import Face from '../icons/Face.svelte';
+	import FaceSmile from '../icons/FaceSmile.svelte';
 	import AppNotification from '../icons/AppNotification.svelte';
 	import AdjustmentsHorizontal from '../icons/AdjustmentsHorizontal.svelte';
 	import ArchiveBox from '../icons/ArchiveBox.svelte';
@@ -147,6 +149,7 @@
 		connections: $i18n.t('Services'),
 		tools: $i18n.t('Services'),
 		personalization: $i18n.t('Preferences'),
+		roleplay: $i18n.t('Preferences'),
 		audio: $i18n.t('Preferences'),
 		data_controls: $i18n.t('Data'),
 		usage: $i18n.t('Data'),
@@ -216,6 +219,12 @@
 			titleKey: 'settings.personal.personalization.title',
 			title: $i18n.t('settings.personal.personalization.title'),
 			searchPrefixes: ['settings.personal.personalization.']
+		},
+		{
+			id: 'roleplay',
+			titleKey: 'Roleplay',
+			title: $i18n.t('Roleplay'),
+			searchPrefixes: []
 		},
 		{
 			id: 'audio',
@@ -399,6 +408,10 @@
 
 			if (tab.id === 'usage') {
 				return $visibleControls['settings.usage'];
+			}
+
+			if (tab.id === 'roleplay') {
+				return $config?.features?.enable_character_cards ?? false;
 			}
 
 			if (tab.id === 'personalization') {
@@ -665,6 +678,19 @@
 								<Face className="size-3.5" strokeWidth="2" />
 								<span>{$i18n.t('settings.personal.personalization.title')}</span>
 							</button>
+						{:else if tabId === 'roleplay'}
+							<button
+								role="tab"
+								aria-controls="tab-roleplay"
+								aria-selected={selectedTab === 'roleplay'}
+								class={tabButtonClass(selectedTab === 'roleplay')}
+								on:click={() => {
+									selectTab('roleplay');
+								}}
+							>
+								<FaceSmile className="size-3.5" strokeWidth="2" />
+								<span>{$i18n.t('Roleplay')}</span>
+							</button>
 						{:else if tabId === 'audio'}
 							<button
 								role="tab"
@@ -823,6 +849,8 @@
 						toast.success($i18n.t('Settings saved successfully!'));
 					}}
 				/>
+			{:else if selectedTab === 'roleplay'}
+				<Roleplay {saveSettings} />
 			{:else if selectedTab === 'audio'}
 				<Audio
 					{saveSettings}

@@ -22,6 +22,7 @@
 	import CalendarIcon from './icons/Calendar.svelte';
 	import ClockIcon from './icons/Clock.svelte';
 	import CodeIcon from './icons/Code.svelte';
+	import FaceSmile from '$lib/components/icons/FaceSmile.svelte';
 	import EmojiFaceIcon from './icons/EmojiFace.svelte';
 	import HelpCircleIcon from './icons/HelpCircle.svelte';
 	import LogOutIcon from './icons/LogOut.svelte';
@@ -65,7 +66,12 @@
 
 	const DEFAULT_PINNED_ITEMS = ['notes', 'workspace'];
 
-	$: pinnedItems = $settings?.pinnedMenuItems ?? DEFAULT_PINNED_ITEMS;
+	// Characters is pinned by default where character cards are on (as in Sidebar.svelte).
+	$: pinnedItems =
+		$settings?.pinnedMenuItems ??
+		($config?.features?.enable_character_cards
+			? ['characters', ...DEFAULT_PINNED_ITEMS]
+			: DEFAULT_PINNED_ITEMS);
 
 	const isPinned = (id: string) => {
 		return pinnedItems.includes(id);
@@ -473,6 +479,58 @@
 				</div>
 			{/if}
 
+			{#if $config?.features?.enable_character_cards}
+				<div
+					class="user-menu-row flex items-center w-full rounded-xl hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition-colors"
+				>
+					<a
+						role="menuitem"
+						href="/characters"
+						draggable="false"
+						class="flex flex-1 min-w-0 h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none"
+						on:click={async (e) => {
+							if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
+							e.preventDefault();
+							show = false;
+							if (appLayout?.openPageTab)
+								appLayout.openPageTab({ href: '/characters', label: $i18n.t('Characters') });
+							else goto('/characters');
+							if ($mobile) {
+								await tick();
+								showSidebar.set(false);
+							}
+						}}
+					>
+						<div class="self-center">
+							<FaceSmile className="size-3.5" strokeWidth="1.5" />
+						</div>
+						<div class="self-center truncate">{$i18n.t('Characters')}</div>
+					</a>
+					{#if shiftKey}
+						<Tooltip
+							content={pinnedItems.includes('characters')
+								? $i18n.t('Unpin from Sidebar')
+								: $i18n.t('Pin to Sidebar')}
+						>
+							<button
+								aria-label={pinnedItems.includes('characters')
+									? $i18n.t('Unpin from Sidebar')
+									: $i18n.t('Pin to Sidebar')}
+								role="menuitem"
+								type="button"
+								class="p-1 mr-1 rounded-lg hover:bg-gray-100/60 dark:hover:bg-gray-700/60 transition"
+								on:click|preventDefault|stopPropagation={() => togglePin('characters')}
+							>
+								{#if pinnedItems.includes('characters')}
+									<PinSlashIcon className="size-3.5" strokeWidth="1.5" />
+								{:else}
+									<PinIcon className="size-3.5" strokeWidth="1.5" />
+								{/if}
+							</button>
+						</Tooltip>
+					{/if}
+				</div>
+			{/if}
 			{#if role === 'admin'}
 				<div
 					class="user-menu-row flex items-center w-full rounded-xl hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition-colors"
