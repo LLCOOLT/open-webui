@@ -200,7 +200,30 @@ export const looksLikeCharacterCard = (text: string): boolean => {
 		'greeting',
 		'example dialogue'
 	];
-	return labels.size >= 3 || (labels.size >= 2 && roleplay.some((label) => labels.has(label)));
+	if (labels.size >= 3 || (labels.size >= 2 && roleplay.some((label) => labels.has(label)))) {
+		return true;
+	}
+	return looksLikeHeadedCard(text);
+};
+
+// Topics of the headings a character sheet is made of, whatever their exact wording.
+const CHARACTER_TOPIC_RE =
+	/personality|appearance|backstory|background|identity|psycholog|trait|quirk|likes|dislikes|fears|hobb|relationship|voice|speech|how (?:she|he|they) talks|secret|flaw|strength|motivation|outfit|clothes|body|vibe|scenario|greeting|first message|example dialogue|who (?:she|he|they) (?:is|are)/i;
+const HEADING_LINE_RE = /^\s*(?:#{1,6}\s+(.+?)|\*\*([^*]+?)\*\*)\s*:?\s*$/gm;
+
+/**
+ * A card written as a sheet of headings ("# Juno Vale", "## How she talks", ...). Needs several
+ * headings about a character, and a name, so a structured answer about anything else is not one.
+ */
+const looksLikeHeadedCard = (text: string): boolean => {
+	const headings = [...text.matchAll(HEADING_LINE_RE)].map((match) =>
+		(match[1] ?? match[2]).trim()
+	);
+	const topical = headings.filter((heading) => CHARACTER_TOPIC_RE.test(heading)).length;
+	const named =
+		/^\s*(?:#{1,6}\s*|\*\*)?\s*(?:name|character name)\s*(?:\*\*)?\s*:/im.test(text) ||
+		/^\s*#\s+\S/m.test(text);
+	return (named && topical >= 2) || topical >= 4;
 };
 
 const CARD_START_RE =
@@ -217,7 +240,9 @@ export const extractCharacterCard = (text: string): string | null => {
 	}
 	if (!looksLikeCharacterCard(text)) return null;
 	const lines = text.split('\n');
-	const start = lines.findIndex((line) => CARD_START_RE.test(line));
+	// The card starts at its "Name:" line, else at its first heading.
+	let start = lines.findIndex((line) => CARD_START_RE.test(line));
+	if (start < 0) start = lines.findIndex((line) => /^\s*#{1,6}\s+\S/.test(line));
 	const card = (start > 0 ? lines.slice(start) : lines).join('\n').trim();
 	// "Want me to adjust anything?" after the card is the assistant talking, not part of it.
 	return card.replace(/\n\s*\n[^\n]{1,160}\?\s*$/, '').trim();

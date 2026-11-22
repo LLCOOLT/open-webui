@@ -302,12 +302,27 @@ def test_long_form_template():
     assert character['name'] == 'Lena Hart'
     description, personality = character['description'], character['personality']
     # Who she is and how she looks: description, with the headings kept for context.
-    for text in ('Night-shift paramedic', 'Appearance & vibe:', 'Taps her keys', "father's pharmacy",
-                 'Calm in a crisis', 'Personal goal:', 'Sam: partner on shift'):
+    for text in (
+        'Night-shift paramedic',
+        'Appearance & vibe:',
+        'Taps her keys',
+        "father's pharmacy",
+        'Calm in a crisis',
+        'Personal goal:',
+        'Sam: partner on shift',
+    ):
         assert text in description, text
     # How she thinks and talks: personality.
-    for text in ('- dry', 'Goes quiet', 'Core contradiction:', 'Night drives', 'Small talk',
-                 'Names every ambulance', 'Tone: clipped, deadpan', "You're fine. Probably."):
+    for text in (
+        '- dry',
+        'Goes quiet',
+        'Core contradiction:',
+        'Night drives',
+        'Small talk',
+        'Names every ambulance',
+        'Tone: clipped, deadpan',
+        "You're fine. Probably.",
+    ):
         assert text in personality, text
     assert 'Parked outside the hospital' in character['scenario']
     assert character['creator_notes'] == 'Keep her guarded for the first few chats.'
@@ -321,3 +336,58 @@ def test_long_form_template():
             continue
         if text and not text.startswith('Name'):
             assert text.replace('Lena Hart', '{{char}}') in every_field.replace('Lena Hart', '{{char}}'), text
+
+
+# Headings vary from card to card; every one starts a section, routed by topic.
+VARIED_CARD = """# Juno Vale
+
+## Who she is
+A courier who runs messages between rival guilds.
+
+## Backstory
+Raised on the docks.
+
+### Childhood
+Learned to pick locks at nine.
+
+## Secrets
+She works for both guilds.
+
+## Strengths & flaws
+**Strengths**
+- Fast, observant
+**Flaws**
+- Lies by reflex
+
+## Random stuff
+Collects bottle caps.
+
+## World
+A canal city run by guilds.
+
+## How she talks
+Quick, slangy, never finishes a sentence when a look will do.
+"""
+
+
+def test_any_heading_starts_a_section():
+    character = parse_system_prompt(VARIED_CARD, 'fallback').character
+    assert character['name'] == 'Juno Vale'  # the "# Title" line
+    description, personality = character['description'], character['personality']
+    assert description.startswith('Who she is:\nA courier')
+    # A subheading stays with the section it is under.
+    assert '### Childhood\nLearned to pick locks' in description
+    # Unknown topics go to the description, with their heading.
+    assert 'Random stuff:\nCollects bottle caps.' in description
+    assert 'Secrets:\nShe works for both guilds.' in personality
+    # Bold lines inside a section stay in it.
+    assert '**Strengths**\n- Fast, observant\n**Flaws**\n- Lies by reflex' in personality
+    # A section after "## World" is not swallowed by the scenario.
+    assert 'How she talks:\nQuick, slangy' in personality
+    assert character['scenario'] == 'A canal city run by guilds.'
+    assert 'Juno Vale' not in description + personality
+
+
+def test_explicit_name_beats_title():
+    character = parse_system_prompt('# Character sheet\n\nName: Ana\n\n## Personality\nShy.', 'x').character
+    assert character['name'] == 'Ana'

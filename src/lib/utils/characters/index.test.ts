@@ -151,3 +151,27 @@ describe('extractCharacterCard', async () => {
 		).toMatch(/^data:image\/svg\+xml/);
 	});
 });
+
+describe('looksLikeCharacterCard with free-form headings', async () => {
+	const { looksLikeCharacterCard, extractCharacterCard } = await import('./index');
+	const sheet =
+		'# Juno Vale\n\n## Who she is\nA courier.\n\n## Secrets\nShe works for both guilds.\n\n## How she talks\nQuick, slangy.';
+
+	it('recognizes a sheet of headings', () => {
+		expect(looksLikeCharacterCard(sheet)).toBe(true);
+		expect(extractCharacterCard(`Here she is:\n\n${sheet}\n\nWant changes?`)).toBe(sheet);
+	});
+
+	it('leaves other structured answers alone', () => {
+		expect(
+			looksLikeCharacterCard(
+				'# Setting up Docker\n\n## Install\nRun the installer.\n\n## Configure\nEdit the file.\n\n## Troubleshooting\nRestart.'
+			)
+		).toBe(false);
+		expect(
+			looksLikeCharacterCard(
+				'# Team update\n\n## Background\nWe moved offices.\n\n## Next steps\nHire two people.'
+			)
+		).toBe(false);
+	});
+});

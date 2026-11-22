@@ -157,7 +157,21 @@ def _header(line: str) -> tuple[str, str, bool] | None:
 # routed by topic. Checked in order; the heading is kept in the field as context.
 TOPIC_KEYWORDS = (
     ('first_mes', ('first message', 'greeting', 'opening line')),
-    ('scenario', ('scenario', 'current status', 'current situation', 'setting', 'premise', 'where they are')),
+    (
+        'scenario',
+        (
+            'scenario',
+            'current status',
+            'current situation',
+            'setting',
+            'premise',
+            'where they are',
+            'world',
+            'location',
+            'situation',
+            'plot',
+        ),
+    ),
     ('system_prompt', ('rule', 'instruction', 'guideline', 'writing style', 'formatting', 'response style')),
     (
         'personality',
@@ -180,6 +194,19 @@ TOPIC_KEYWORDS = (
             'trigger',
             'values',
             'flaw',
+            'strength',
+            'secret',
+            'motivation',
+            'desire',
+            'dream',
+            'habit',
+            'mood',
+            'emotion',
+            'attitude',
+            'talk',
+            'dialogue style',
+            'humor',
+            'humour',
         ),
     ),
     (
@@ -208,50 +235,89 @@ TOPIC_KEYWORDS = (
         ),
     ),
 )
-HEADING_RE = re.compile(r'^\s*(?:#{1,6}\s+(?P<hash>.+?)|\*\*(?P<bold>[^*]+?)\*\*)\s*:?\s*$')
+HEADING_RE = re.compile(r'^\s*(?:(?P<hashes>#{1,6})\s+(?P<hash>.+?)|\*\*(?P<bold>[^*]+?)\*\*)\s*:?\s*$')
+# Headings nobody can place go here: description is the card's "who this character is" field.
+FALLBACK_FIELD = 'description'
 
 
-def _topic_header(line: str) -> tuple[str, str] | None:
-    """``(field, heading)`` for a standalone heading line whose topic belongs to a card field."""
+def _heading(line: str) -> tuple[int, str] | None:
+    """``(level, text)`` for a standalone heading: ``## Text`` (level 2) or a line that is only bold."""
     match = HEADING_RE.match(line)
     if not match:
         return None
-    heading = (match.group('hash') or match.group('bold') or '').strip().rstrip(':').strip()
-    lowered = heading.lower()
-    if not heading or len(heading) > 60:
+    text = (match.group('hash') or match.group('bold') or '').strip().rstrip(':').strip().strip('*_').strip()
+    if not text or len(text) > 60:
         return None
+    # A bold line ranks below any markdown heading, so "**Strengths**" inside "## Strengths & flaws" stays in it.
+    return (len(match.group('hashes')) if match.group('hashes') else 7), text
+
+
+def _topic(heading: str) -> str | None:
+    """The card field a heading's topic belongs to, if any."""
+    lowered = heading.lower()
     for field_name, keywords in TOPIC_KEYWORDS:
         if any(keyword in lowered for keyword in keywords):
-            return field_name, heading
+            return field_name
     return None
 
 
+def _looks_like_title(text: str) -> bool:
+    words = text.split()
+    return 0 < len(words) <= 5 and all(word[:1].isupper() or not word[:1].isalpha() for word in words)
+
+
 def _sections(text: str) -> tuple[str, dict[str, list[str]]]:
+    """Split ``text`` at its section headings.
+
+    Card labels ("Personality:", "## Scenario") start their field. Any other heading starts a section
+    routed by topic ("## How she talks" to personality), or to the description when the topic is
+    unknown, keeping the heading as context. A deeper heading ("### Childhood" under "## Backstory")
+    stays in the section it is under. A short "# Title" before everything else is the name.
+    """
     preamble: list[str] = []
     sections: dict[str, list[str]] = {}
     current: list[str] = preamble
+    level: int | None = None  # heading level of the current section; None in the preamble
+
+    def start(field_name: str) -> list[str]:
+        section = sections.setdefault(field_name, [])
+        if section:
+            section.append('')
+        return section
+
     for line in text.replace('\r\n', '\n').split('\n'):
         if CLOSING_TAG_RE.match(line):
-            current = preamble
+            current, level = preamble, None
+            continue
+        heading = _heading(line)
+        if heading and level is not None and heading[0] > level:
+            current.append(line)
             continue
         header = _header(line)
         if header:
             field_name, rest, closed = header
-            section = sections.setdefault(field_name, [])
-            if section:
-                section.append('')
+            current = start(field_name)
             if rest:
-                section.append(rest)
-            current = preamble if closed else section
+                current.append(rest)
+            if closed:
+                current, level = preamble, None
+            else:
+                level = heading[0] if heading else 7
             continue
-        topic = _topic_header(line)
-        if topic:
-            field_name, heading = topic
-            section = sections.setdefault(field_name, [])
-            if section:
-                section.append('')
-            section.append(f'{heading}:')
-            current = section
+        if heading:
+            heading_level, heading_text = heading
+            if (
+                heading_level == 1
+                and not sections
+                and not any(part.strip() for part in preamble)
+                and _topic(heading_text) is None
+                and _looks_like_title(heading_text)
+            ):
+                sections['_title'] = [heading_text]
+                continue
+            current = start(_topic(heading_text) or FALLBACK_FIELD)
+            current.append(f'{heading_text}:')
+            level = heading_level
             continue
         current.append(line)
     return '\n'.join(preamble).strip(), {key: '\n'.join(lines).strip() for key, lines in sections.items()}
@@ -336,7 +402,11 @@ def _tag_list(text: str) -> list[str]:
 def parse_system_prompt(system: str, model_name: str = '') -> Conversion:
     """Split a system prompt into character fields. Every line of the input ends up in some field."""
     preamble, sections = _sections(system or '')
-    name = _find_name(preamble, sections, model_name)
+    # An explicit "Name:" wins, then a "# Title" heading, then "You are <Name>" style guesses.
+    title = sections.pop('_title', '')
+    name = _find_name(preamble, sections, model_name) if not title or sections.get('name') else title
+    if title and sections.get('name'):
+        name = _find_name(preamble, sections, model_name)
     # Lines under "Name:" after the name itself ("Age: 25", "Gender: ...") describe the character.
     name_rest = '\n'.join(sections.get('name', '').split('\n')[1:]).strip()
     lists = {key: sections.pop(key) for key in LIST_LABEL_FIELDS if key in sections}
