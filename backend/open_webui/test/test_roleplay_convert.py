@@ -159,3 +159,70 @@ def test_source_prompt_is_kept_but_not_compiled_or_exported():
     # Seeded verbatim: the original wording reaches the model once, via the system prompt field.
     assert compile_static_system_prompt(character).count('Always speak in pirate slang.') == 1
     assert 'source_prompt' not in json.dumps(character_to_v3(character))
+
+
+# The kind of card people write in another chat and paste in.
+CHAT_WRITTEN_CARD = """**Name:** Captain Mara Voss
+Age: 34
+Gender: Female
+
+**Appearance:** Weathered coat, a scar across her left brow.
+
+**Personality:** Dry humour, fiercely loyal, hates being lied to.
+
+**Scenario:** {{user}} has just signed on as the newest hand aboard the Gull.
+
+**First Message:** *Mara looks you over.* "You'll do. Barely."
+
+**Alternate Greetings:**
+1. "Storm's coming. Grab a rope."
+2. *She tosses you an apple.* "Eat. You look half-dead."
+
+**Example Dialogue:**
+{{user}}: Where are we headed?
+Mara: Wherever the coin is.
+
+**Tags:** pirate, adventure, female
+"""
+
+
+def test_chat_written_card():
+    result = parse_system_prompt(CHAT_WRITTEN_CARD, 'fallback')
+    character = result.character
+    assert character['name'] == 'Captain Mara Voss'
+    # The lines under the name are kept, ahead of the appearance.
+    assert character['description'].startswith('Age: 34\nGender: Female')
+    assert 'scar across her left brow' in character['description']
+    assert character['personality'].startswith('Dry humour')
+    assert character['first_mes'] == '*Mara looks you over.* "You\'ll do. Barely."'
+    assert character['alternate_greetings'] == [
+        "Storm's coming. Grab a rope.",
+        '*She tosses you an apple.* "Eat. You look half-dead."',
+    ]
+    assert character['mes_example'] == '<START>\n{{user}}: Where are we headed?\n{{char}}: Wherever the coin is.'
+    assert character['tags'] == ['pirate', 'adventure', 'female']
+    assert {'alternate_greetings', 'tags', 'first_mes', 'personality'} <= set(result.detected)
+
+
+def test_pasted_json_card():
+    from open_webui.utils.roleplay.convert import card_from_json_text
+
+    text = (
+        'Here is your card:\n```json\n'
+        + (
+            '{"spec": "chara_card_v2", "spec_version": "2.0", "data": {"name": "Kai", "description": "Calm.",'
+            ' "first_mes": "Hi {{user}}.", "alternate_greetings": ["Yo."], "tags": ["calm"],'
+            ' "character_book": {"entries": [{"keys": ["tea"], "content": "Kai loves tea."}]}}}'
+        )
+        + '\n```'
+    )
+    result = card_from_json_text(text)
+    assert result.character['name'] == 'Kai'
+    assert result.character['alternate_greetings'] == ['Yo.']
+    assert result.character['character_book']['entries'][0]['content'] == 'Kai loves tea.'
+    assert 'character_book' in result.detected
+
+    # A plain v1-style object works too; prose and broken JSON do not count as a card.
+    assert card_from_json_text('{"name": "Ana", "personality": "shy"}').character['personality'] == 'shy'
+    assert card_from_json_text('You are Max. {not json}') is None
+    assert card_from_json_text('{"title": "no name here"}') is None

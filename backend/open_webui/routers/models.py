@@ -70,8 +70,10 @@ from open_webui.utils.roleplay.assist import clean_image_prompt, sprite_edit_pro
 from open_webui.utils.roleplay.cards import (
     ZIP_SIGNATURE,
     CardParseError,
+    CharacterData,
     ParsedCard,
     character_to_v3,
+    normalize_lorebook,
     parse_card_bytes,
     sniff_image_type,
     write_card_png,
@@ -80,6 +82,7 @@ from open_webui.utils.roleplay.character import CharacterMeta, character_summary
 from open_webui.utils.roleplay.convert import (
     Conversion,
     ai_conversion_prompt,
+    card_from_json_text,
     character_from_ai_reply,
     parse_system_prompt,
 )
@@ -107,7 +110,7 @@ from open_webui.utils.voice_avatar import (
     validate_voice_animation,
     validate_voice_avatar,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -1140,7 +1143,7 @@ class CharacterConvertForm(BaseModel):
 class CharacterConvertResponse(BaseModel):
     character: dict
     detected: list[str]
-    method: Literal['parser', 'ai']
+    method: Literal['parser', 'ai', 'card']
 
 
 async def _convert_with_task_model(request: Request, form_data: CharacterConvertForm, user) -> Conversion:
@@ -1169,6 +1172,11 @@ async def convert_system_prompt_to_character(
     if not form_data.system.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='The system prompt is empty.')
 
+    # Card JSON pasted as text (e.g. written in another chat) is read as a card, as an import would.
+    card = await asyncio.to_thread(card_from_json_text, form_data.system)
+    if card is not None:
+        return CharacterConvertResponse(character=card.character, detected=card.detected, method='card')
+
     if not form_data.use_ai:
         conversion = parse_system_prompt(form_data.system, form_data.name)
         return CharacterConvertResponse(character=conversion.character, detected=conversion.detected, method='parser')
@@ -1178,6 +1186,51 @@ async def convert_system_prompt_to_character(
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
     return CharacterConvertResponse(character=conversion.character, detected=conversion.detected, method='ai')
+
+
+class CharacterCreateForm(BaseModel):
+    base_model_id: str
+    character: dict
+    public: bool = False
+
+
+@router.post('/characters/create', response_model=list[ModelModel])
+async def create_character(
+    request: Request,
+    form_data: CharacterCreateForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Create a character model from reviewed card fields (e.g. text pasted and converted above).
+
+    Unlike card file import this is open to anyone who may create models: the fields are plain text
+    the user has seen, with no embedded images or archives. Only admins can make it public.
+    """
+    await _require_character_cards_enabled()
+    if user.role != 'admin' and not await has_permission(
+        user.id, 'workspace.models', await Config.get('user.permissions'), db=db
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.UNAUTHORIZED)
+    if not await _base_model_exists(request, form_data.base_model_id, user):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Unknown base model.')
+
+    allowed = set(CharacterData.model_fields) - {'raw', 'raw_truncated', 'assets', 'extensions', 'spec_version'}
+    fields = {key: value for key, value in form_data.character.items() if key in allowed}
+    if fields.get('character_book') is not None:
+        fields['character_book'] = normalize_lorebook(fields['character_book'])
+    try:
+        character = CharacterData(spec_version='owui', **fields)
+    except ValidationError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid character fields.') from error
+    if not character.name.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='The character needs a name.')
+    if len(json.dumps(character.model_dump(), ensure_ascii=False)) > CHARACTER_CARD_MAX_BYTES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='The character is too large.')
+
+    parsed = ParsedCard(character=character, source_format='json')
+    return await _create_character_models(
+        request, [parsed], form_data.base_model_id, form_data.public and user.role == 'admin', user, db
+    )
 
 
 ############################

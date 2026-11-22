@@ -69,7 +69,20 @@ LABELS = {
     ),
     'post_history_instructions': ('post history instructions', 'post-history instructions', 'reminder', 'reminders'),
     'creator_notes': ('notes', 'creator notes', 'author notes', "author's notes"),
+    'alternate_greetings': (
+        'alternate greetings',
+        'alternative greetings',
+        'alternate greeting',
+        'other greetings',
+        'extra greetings',
+        'more greetings',
+        'alternate first messages',
+        'alternate openings',
+    ),
+    'tags': ('tags', 'keywords', 'categories'),
 }
+LIST_LABEL_FIELDS = ('alternate_greetings', 'tags')
+LIST_ITEM_RE = re.compile(r'^\s*(?:[-*•]|\d+[.)]|#\d+:?|greeting\s*\d+\s*:)\s*', re.IGNORECASE)
 LABEL_TO_FIELD = {label: key for key, labels in LABELS.items() for label in labels}
 
 WRAPPERS = (('**', '**'), ('__', '__'), ('[', ']'), ('<', '>'))
@@ -134,7 +147,8 @@ def _header(line: str) -> tuple[str, str, bool] | None:
     bare = not rest.strip() and not colon
     if not (hashes or wrapped or colon or bare):
         return None
-    rest = rest.strip().lstrip(':').strip().strip('*_').strip()
+    # Only the remains of the label's own markup ("Scenario:** text"); a leading *action* stays.
+    rest = re.sub(r'^[*_]+(?=\s|$)', '', rest.strip().lstrip(':').strip()).strip()
     closed = bool(TRAILING_CLOSING_TAG_RE.search(rest))
     return field_name, TRAILING_CLOSING_TAG_RE.sub('', rest), closed
 
@@ -182,8 +196,18 @@ def _with_macros(text: str, name: str) -> str:
     return text
 
 
+def _unquote(text: str) -> str:
+    """Drop quotes wrapping the whole text; quotes inside it (after an *action*) stay."""
+    text = text.strip()
+    if len(text) > 1 and text[0] in '"“' and text[-1] in '"”' and not re.search(r'["“”]', text[1:-1]):
+        return text[1:-1].strip()
+    return text
+
+
 def _example_dialogue(text: str, name: str) -> str:
-    speaker_char = rf'(?:{CHAR_SPEAKERS}|{re.escape(name)})' if name else CHAR_SPEAKERS
+    # "Captain Mara Voss" speaks as "Mara" too.
+    names = [re.escape(part) for part in dict.fromkeys([name, *name.split()]) if len(part) > 1] if name else []
+    speaker_char = rf'(?:{CHAR_SPEAKERS}|{"|".join(names)})' if names else CHAR_SPEAKERS
     lines = []
     for line in text.split('\n'):
         line = re.sub(rf'^\s*\**{USER_SPEAKERS}\**\s*:\s*', '{{user}}: ', line, flags=re.IGNORECASE)
@@ -193,17 +217,41 @@ def _example_dialogue(text: str, name: str) -> str:
     return text if not text or text.upper().startswith('<START>') else f'<START>\n{text}'
 
 
+def _greeting_list(text: str) -> list[str]:
+    """Alternate greetings written as a list ("- ...", "1. ...") or as paragraphs."""
+    lines = text.split('\n')
+    if any(LIST_ITEM_RE.match(line) for line in lines):
+        items: list[str] = []
+        for line in lines:
+            if LIST_ITEM_RE.match(line):
+                items.append(LIST_ITEM_RE.sub('', line, count=1))
+            elif items:
+                items[-1] += '\n' + line
+            elif line.strip():
+                items.append(line)
+    else:
+        items = re.split(r'\n\s*\n', text)
+    return [_unquote(item) for item in items if item.strip()]
+
+
+def _tag_list(text: str) -> list[str]:
+    tags = [LIST_ITEM_RE.sub('', tag).strip().strip('#').strip() for tag in re.split(r'[,\n]', text)]
+    return [tag for tag in dict.fromkeys(tags) if tag]
+
+
 def parse_system_prompt(system: str, model_name: str = '') -> Conversion:
     """Split a system prompt into character fields. Every line of the input ends up in some field."""
     preamble, sections = _sections(system or '')
     name = _find_name(preamble, sections, model_name)
+    # Lines under "Name:" after the name itself ("Age: 25", "Gender: ...") describe the character.
+    name_rest = '\n'.join(sections.get('name', '').split('\n')[1:]).strip()
+    lists = {key: sections.pop(key) for key in LIST_LABEL_FIELDS if key in sections}
 
     character: dict = {key: '' for key in TEXT_FIELDS}
     character.update({key: value for key, value in sections.items() if key != 'name'})
-    if preamble:
-        character['description'] = '\n\n'.join(part for part in (preamble, character['description']) if part)
+    character['description'] = '\n\n'.join(part for part in (preamble, name_rest, character['description']) if part)
     if character['first_mes']:
-        character['first_mes'] = character['first_mes'].strip().strip('"“”')
+        character['first_mes'] = _unquote(character['first_mes'])
     if character['mes_example']:
         character['mes_example'] = _example_dialogue(character['mes_example'], name)
 
@@ -211,8 +259,14 @@ def parse_system_prompt(system: str, model_name: str = '') -> Conversion:
         if key not in ('name', 'creator_notes'):
             character[key] = _with_macros(character[key], name)
     character['name'] = name
+    if 'alternate_greetings' in lists:
+        character['alternate_greetings'] = [
+            _with_macros(greeting, name) for greeting in _greeting_list(lists['alternate_greetings'])
+        ]
+    if 'tags' in lists:
+        character['tags'] = _tag_list(lists['tags'])
 
-    detected = sorted(sections)
+    detected = sorted({*sections, *lists})
     if character['system_prompt']:
         # The author's rules sit alongside the default roleplay instruction rather than replacing it.
         character['prompt_overrides'] = {'system_prompt': 'supplement', 'post_history': 'replace'}
@@ -307,4 +361,30 @@ def character_from_ai_reply(reply: str, model_name: str = '', source: str = '') 
     if character['system_prompt']:
         character['prompt_overrides'] = {'system_prompt': 'supplement', 'post_history': 'replace'}
     detected = [key for key in TEXT_FIELDS if key != 'name' and character[key]]
+    return Conversion(character=character, detected=detected)
+
+
+####################
+# Pasted card JSON
+####################
+
+CARD_LIST_FIELDS = ('alternate_greetings', 'tags')
+
+
+def card_from_json_text(text: str) -> Conversion | None:
+    """A character card pasted as JSON (any format card import reads, in a code fence or not)."""
+    from open_webui.utils.roleplay.cards import CardParseError, normalize_card
+
+    start, end = (text or '').find('{'), (text or '').rfind('}')
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start : end + 1])
+        card = normalize_card(data)
+    except (json.JSONDecodeError, CardParseError, ValueError):
+        return None
+    character = card.model_dump(include={*TEXT_FIELDS, *CARD_LIST_FIELDS, 'character_book', 'creator'})
+    detected = [
+        key for key in (*TEXT_FIELDS, *CARD_LIST_FIELDS, 'character_book') if key != 'name' and character.get(key)
+    ]
     return Conversion(character=character, detected=detected)

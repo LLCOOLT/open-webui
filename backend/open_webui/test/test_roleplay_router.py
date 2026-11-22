@@ -510,3 +510,44 @@ async def test_personas_and_out_of_character(users):
     assert messages[0]['content'].startswith('Sir Aldo is speaking out of character')
     assert 'Roleplay context, for reference only' in messages[0]['content']
     assert messages[-1] == {'role': 'user', 'content': 'Hello'}
+
+
+async def test_create_character_from_pasted_text(app, client, users):
+    from open_webui.models.lorebooks import Lorebooks
+
+    pasted = json.dumps(
+        {**CARD, 'data': {**CARD['data'], 'character_book': {'entries': [{'keys': ['glade'], 'content': 'Warded.'}]}}}
+    )
+    converted = await client.post('/api/v1/models/characters/convert', json={'system': pasted})
+    assert converted.status_code == 200, converted.text
+    assert converted.json()['method'] == 'card'
+    character = converted.json()['character']
+
+    response = await client.post(
+        '/api/v1/models/characters/create', json={'base_model_id': 'base-model', 'character': character}
+    )
+    assert response.status_code == 200, response.text
+    model = await Models.get_model_by_id(response.json()[0]['id'])
+    assert model.name == 'Seraphina'
+    assert model.meta.character.first_mes == 'Welcome, {{user}}.'
+    assert model.meta.character.alternate_greetings == ['Back again, {{user}}?']
+    [lorebook_id] = model.meta.lorebook_ids
+    assert (await Lorebooks.get_lorebook_by_id(lorebook_id)).data['entries'][0]['content'] == 'Warded.'
+    # The character prompt is compiled from the fields, not left empty.
+    assert 'guards the forest' in model.params.system
+
+    assert (
+        await client.post('/api/v1/models/characters/create', json={'base_model_id': 'nope', 'character': character})
+    ).status_code == 400
+    assert (
+        await client.post(
+            '/api/v1/models/characters/create', json={'base_model_id': 'base-model', 'character': {'name': ' '}}
+        )
+    ).status_code == 400
+
+    # Needs the models workspace permission (or admin).
+    app.state.current_user = users['user']
+    response = await client.post(
+        '/api/v1/models/characters/create', json={'base_model_id': 'base-model', 'character': character}
+    )
+    assert response.status_code == 401
