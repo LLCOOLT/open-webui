@@ -2362,15 +2362,65 @@
 		}
 		joinedChatId = '';
 		syncChatRoom($socket, $chatId, $temporaryChat);
-		const id = $chatId;
+		await resyncPendingReplies($chatId);
+	};
+
+	// Unfinished replies whose events may have been missed (the socket was down, or the page was
+	// suspended): ask the server whether they are still running, and reload the chat once they are
+	// not, so finished replies show without a page reload. Returns false if the server was unreachable.
+	const resyncPendingReplies = async (id: string) => {
 		const tasks = await getTaskIdsByChatId(localStorage.token, id).catch(() => null);
-		if ($chatId !== id || !tasks) return;
+		if ($chatId !== id || !tasks) return false;
 		taskIds = tasks.task_ids?.length ? tasks.task_ids : null;
 		if (!taskIds && hasPendingAssistantLeaf()) {
-			// A server restart can leave unfinished messages without a completion event.
+			// A server restart or missed completion event leaves unfinished messages behind.
 			const loaded = await loadChat();
 			if (loaded && $chatId === id) await processNextInQueue(id);
 		}
+		return true;
+	};
+
+	// The request for these replies failed on the network. The server records each reply as soon
+	// as it accepts the request, so a reply it knows about is still coming (or already saved); only
+	// one it never heard of failed. Keeps trying for about half a minute while the device is offline.
+	const recoverInterruptedReplies = async (id: string, messageIds: string[]) => {
+		const unfinished = () => messageIds.filter((m) => history.messages[m]?.done === false);
+		const fail = () => {
+			for (const messageId of unfinished()) {
+				history.messages[messageId].done = true;
+				history.messages[messageId].error = {
+					content: $i18n.t('Connection lost. Please retry.')
+				};
+			}
+			history = history;
+		};
+
+		let unknownCount = 0;
+		for (let attempt = 0; attempt < 6; attempt += 1) {
+			if ($chatId !== id || unfinished().length === 0) return;
+			const fresh = await getChatById(localStorage.token, id).catch(() => null);
+			if ($chatId !== id) return;
+			if (fresh) {
+				const serverMessages = fresh.chat?.history?.messages ?? {};
+				if (messageIds.some((messageId) => serverMessages[messageId])) {
+					await resyncPendingReplies(id);
+					return;
+				}
+				// The server may not have recorded the request yet; give it a moment before giving up.
+				if ((unknownCount += 1) >= 2) return fail();
+			}
+			await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** Math.min(attempt, 4)));
+		}
+		fail();
+	};
+
+	// iOS drops connections of a backgrounded page without telling it, so events sent meanwhile are
+	// lost and the socket only notices after its ping timeout. Catch up as soon as the page is back.
+	const handleVisibilityChange = () => {
+		if (document.visibilityState !== 'visible') return;
+		if ($socket && !$socket.connected) $socket.connect();
+		const id = $chatId;
+		if (id && isSavedChatId(id) && hasPendingAssistantLeaf()) resyncPendingReplies(id);
 	};
 
 	onMount(() => {
@@ -2378,6 +2428,7 @@
 		console.log('mounted');
 		if (!embedded && appLayout) appLayout.initNewChat = initNewChat;
 		window.addEventListener('message', onMessageHandler);
+		document.addEventListener('visibilitychange', handleVisibilityChange);
 		$socket?.on('events', chatEventHandler);
 		$socket?.on('connect', handleSocketConnect);
 		$socket?.on('disconnect', clearTyping);
@@ -2483,6 +2534,7 @@
 				chatTitle.set('');
 
 				window.removeEventListener('message', onMessageHandler);
+				document.removeEventListener('visibilitychange', handleVisibilityChange);
 				$socket?.off('events', chatEventHandler);
 				$socket?.off('connect', handleSocketConnect);
 				$socket?.off('disconnect', clearTyping);
@@ -5395,6 +5447,19 @@
 			`${WEBUI_BASE_URL}/api`
 		).catch(async (error) => {
 			console.log(error);
+
+			if (error?.network && isSavedChatId(_chatId)) {
+				// The connection dropped, but the server may already be writing the reply (it keeps
+				// going without this request). Check with it rather than failing the reply.
+				recoverInterruptedReplies(
+					_chatId,
+					(messageIdsList ?? [{ message_id: responseMessageId }]).map(
+						({ message_id }) => message_id
+					)
+				);
+				return null;
+			}
+			if (error?.network) error = $i18n.t('Connection lost. Please retry.');
 
 			let errorMessage = error;
 			if (error?.error?.message) {

@@ -19,6 +19,17 @@ export const getErrorMessage = (err: any, fallback = 'Server connection failed')
 	);
 };
 
+// fetch rejects with a TypeError when the connection itself fails ("Load failed" in Safari, "Failed
+// to fetch" in Chrome), e.g. when iOS suspends a backgrounded page mid-request. The request may still
+// have reached the server, so callers can check with it instead of treating the reply as failed.
+export class NetworkError extends Error {
+	readonly network = true;
+
+	toString() {
+		return this.message;
+	}
+}
+
 export const getOpenAIConfig = async (token: string = '') => {
 	let error = null;
 
@@ -394,7 +405,10 @@ export const generateOpenAIChatCompletion = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = getErrorMessage(err);
+			error =
+				err instanceof TypeError
+					? new NetworkError(err.message || 'Network error')
+					: getErrorMessage(err);
 			return null;
 		});
 
