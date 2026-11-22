@@ -37,7 +37,7 @@ from open_webui.env import (
 )
 from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_session
-from open_webui.models.access_grants import AccessGrants, normalize_access_grants
+from open_webui.models.access_grants import AccessGrants
 from open_webui.models.config import Config
 from open_webui.models.files import Files
 from open_webui.models.groups import Groups
@@ -56,7 +56,12 @@ from open_webui.models.models import (
     Models,
 )
 from open_webui.storage.provider import Storage
-from open_webui.utils.access_control import filter_allowed_access_grants, has_access, has_permission
+from open_webui.utils.access_control import (
+    filter_allowed_access_grants,
+    has_access,
+    has_permission,
+    validate_access_grants,
+)
 from open_webui.utils.access_control.files import has_access_to_file
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.chat_variables import get_chat_variables_schema
@@ -97,10 +102,10 @@ from open_webui.utils.roleplay.story import analyze_story, greeting_prompt, writ
 from open_webui.utils.roleplay.task_model import run_task_prompt
 from open_webui.utils.validate import BACKGROUND_IMAGE_MAX_BYTES, validate_background_image
 from open_webui.utils.voice_avatar import (
-    AVATAR_MAX_BYTES,
     ANIMATION_MAX_BYTES,
-    validate_voice_avatar,
+    AVATAR_MAX_BYTES,
     validate_voice_animation,
+    validate_voice_avatar,
 )
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -125,7 +130,7 @@ async def _check_model_controls(form, previous, user, request):
         if not request.app.state.MODELS:
             await get_all_models(request, user=user)
         base = request.app.state.MODELS.get(form.base_model_id or form.id, {})
-        if 'pipe' in base or base.get('direct') or base.get('owned_by') == 'arena':
+        if 'pipe' in base or base.get('owned_by') == 'arena':
             raise HTTPException(400, 'Model controls require a server-managed provider model.')
 
 
@@ -263,11 +268,7 @@ async def _verify_knowledge_file_access(
             )
 
 
-###########################
-# GetModels
-# Let each model here be judged by what it does and not
-# by what it claims. The house deserves honest servants.
-###########################
+# Get Models
 
 
 PAGE_ITEM_COUNT = 30
@@ -351,9 +352,7 @@ async def get_models(
     )
 
 
-###########################
-# GetBaseModels
-###########################
+# Get Base Models
 
 
 @router.get('/all', response_model=list[ModelResponse])
@@ -376,9 +375,7 @@ async def get_base_models(
     return await Models.get_base_models(tag=tag, db=db)
 
 
-###########################
-# GetModelTags
-###########################
+# Get Model Tags
 
 
 @router.get('/tags', response_model=list[str])
@@ -391,9 +388,7 @@ async def get_model_tags(user=Depends(get_verified_user), db: AsyncSession = Dep
     return sorted(tags)
 
 
-############################
-# CreateNewModel
-############################
+# Create New Model
 
 
 @router.post('/create', response_model=ModelModel | None)
@@ -465,7 +460,7 @@ async def create_new_model(
         user.id,
         user.role,
         form_data.access_grants,
-        'sharing.public_models',
+        resource_type='model',
     )
 
     await _check_model_controls(form_data, None, user, request)
@@ -486,9 +481,7 @@ async def create_new_model(
     return model_response(model)
 
 
-############################
-# ExportModels
-############################
+# Export Models
 
 
 class ModelExportResponse(ModelModel):
@@ -546,9 +539,7 @@ async def export_models(
     return exported
 
 
-############################
-# ImportModels
-############################
+# Import Models
 
 
 class ModelsImportForm(BaseModel):
@@ -635,12 +626,10 @@ async def import_models(
                             and existing_model.user_id != user.id
                             and model_id not in writable_model_ids
                         ):
-                            log.warning(
-                                'import_models: user %s skipped model %s (no write access)',
-                                user.id,
-                                model_id,
+                            raise HTTPException(
+                                status_code=status.HTTP_401_UNAUTHORIZED,
+                                detail=ERROR_MESSAGES.MODEL_ID_TAKEN,
                             )
-                            continue
 
                         if (
                             user.role != 'admin'
@@ -662,17 +651,6 @@ async def import_models(
                         model_data['params'] = model_data.get('params', {})
 
                         updated_model = ModelForm(**{**existing_model.model_dump(), **model_data})
-                        # Only filter access_grants when explicitly provided
-                        # in the payload to avoid altering existing ACLs on
-                        # metadata-only imports.
-                        if 'access_grants' in model_data:
-                            updated_model.access_grants = await filter_allowed_access_grants(
-                                await Config.get('user.permissions'),
-                                user.id,
-                                user.role,
-                                updated_model.access_grants,
-                                'sharing.public_models',
-                            )
                         imported_model = updated_model
                     else:
                         # Insert new model
@@ -703,19 +681,17 @@ async def import_models(
                                         base_model_ids.add(base_model_id.split(':', 1)[0])
 
                             if model_id in base_model_ids:
-                                log.warning(
-                                    'import_models: user %s skipped model %s (id belongs to a base model)',
-                                    user.id,
-                                    model_id,
+                                raise HTTPException(
+                                    status_code=status.HTTP_401_UNAUTHORIZED,
+                                    detail=ERROR_MESSAGES.MODEL_ID_TAKEN,
                                 )
-                                continue
 
                         new_model.access_grants = await filter_allowed_access_grants(
                             await Config.get('user.permissions'),
                             user.id,
                             user.role,
                             new_model.access_grants,
-                            'sharing.public_models',
+                            resource_type='model',
                         )
                         imported_model = new_model
 
@@ -1729,9 +1705,7 @@ async def _discard_file_ids(file_ids: list[str], db: AsyncSession) -> None:
             await _discard_uploads([file], db)
 
 
-############################
-# SyncModels
-############################
+# Sync Models
 
 
 class SyncModelsForm(BaseModel):
@@ -1769,9 +1743,7 @@ async def sync_models(
     return models
 
 
-###########################
-# GetModelById
-###########################
+# Get Model By Id
 
 
 class ModelIdForm(BaseModel):
@@ -1828,9 +1800,7 @@ async def get_model_by_id(id: str, user=Depends(get_verified_user), db: AsyncSes
         )
 
 
-###########################
-# GetModelById
-###########################
+# Get Model By Id
 
 
 async def authorized_model_history(id, user, db):
@@ -1889,6 +1859,7 @@ async def delete_model_history_entry(
 async def _verify_version_dependencies(request, form, user, db):
     from open_webui.models.functions import Functions
     from open_webui.models.knowledge import Knowledges
+    from open_webui.models.notes import Notes
     from open_webui.models.skills import Skills
     from open_webui.routers.terminals import list_terminal_servers
     from open_webui.routers.tools import get_tools
@@ -1913,6 +1884,8 @@ async def _verify_version_dependencies(request, form, user, db):
             file = await Files.get_file_by_id(item['id'], db=db)
             if not file or not (user.role == 'admin' or await has_access_to_file(file.id, 'read', user, db=db)):
                 raise HTTPException(400, 'A referenced knowledge file is missing or inaccessible.')
+        elif item.get('type') == 'note':
+            await require_resource('note', item['id'], await Notes.get_note_by_id(item['id'], db=db))
         else:
             await require_resource('knowledge', item['id'], await Knowledges.get_knowledge_by_id(item['id'], db=db))
     for skill_id in getattr(form.meta, 'skillIds', None) or []:
@@ -2030,7 +2003,6 @@ async def get_model_profile_image(
             try:
                 header, base64_data = profile_image_url.split(',', 1)
                 image_data = base64.b64decode(base64_data)
-                image_buffer = io.BytesIO(image_data)
                 media_type = header.split(';')[0].lstrip('data:').lower()
 
                 # only serve known-safe raster types inline; reject SVG/unknown (can run script on our origin)
@@ -2050,8 +2022,8 @@ async def get_model_profile_image(
                 if updated_at:
                     headers['ETag'] = f'"{updated_at}"'
 
-                return StreamingResponse(
-                    image_buffer,
+                return Response(
+                    content=image_data,
                     media_type=media_type,
                     headers=headers,
                 )
@@ -2074,9 +2046,7 @@ async def get_model_profile_image(
     )
 
 
-############################
-# ToggleModelById
-############################
+# Toggle Model By Id
 
 
 @router.post('/model/toggle', response_model=ModelResponse | None)
@@ -2125,9 +2095,7 @@ async def toggle_model_by_id(
         )
 
 
-############################
-# UpdateModelById
-############################
+# Update Model By Id
 
 
 @router.post('/model/update', response_model=ModelModel | None)
@@ -2190,30 +2158,6 @@ async def update_model_by_id(
     await _verify_background_image(form_data.meta.background_image_url, user, db, model.meta.background_image_url)
     _keep_character_files(form_data.meta, model.meta)
 
-    if form_data.access_grants is not None:
-        # The editor resends every stored grant, so re-checking them would strip sharing this user cannot re-create.
-        existing_access_grants = {
-            (grant.principal_type, grant.principal_id, grant.permission) for grant in model.access_grants
-        }
-        submitted_access_grants_map = {
-            (grant['principal_type'], grant['principal_id'], grant['permission']): grant
-            for grant in normalize_access_grants(form_data.access_grants)
-        }
-        preserved_access_grants = [
-            grant for key, grant in submitted_access_grants_map.items() if key in existing_access_grants
-        ]
-        new_access_grants = [
-            grant for key, grant in submitted_access_grants_map.items() if key not in existing_access_grants
-        ]
-
-        form_data.access_grants = preserved_access_grants + await filter_allowed_access_grants(
-            await Config.get('user.permissions'),
-            user.id,
-            user.role,
-            new_access_grants,
-            'sharing.public_models',
-        )
-
     await _check_model_controls(form_data, model, user, request)
     model = await Models.update_model_by_id(form_data.id, form_data, db=db, user_id=user.id)
     if model:
@@ -2227,9 +2171,7 @@ async def update_model_by_id(
     return model_response(model)
 
 
-############################
-# UpdateModelAccessById
-############################
+# Update Model Access By Id
 
 
 class ModelAccessGrantsForm(BaseModel):
@@ -2287,12 +2229,12 @@ async def update_model_access_by_id(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
-    form_data.access_grants = await filter_allowed_access_grants(
+    form_data.access_grants = await validate_access_grants(
         await Config.get('user.permissions'),
         user.id,
         user.role,
         form_data.access_grants,
-        'sharing.public_models',
+        resource_type='model',
     )
 
     await AccessGrants.set_access_grants('model', form_data.id, form_data.access_grants, db=db)
@@ -2309,9 +2251,7 @@ async def update_model_access_by_id(
     return model_response(model)
 
 
-############################
-# DeleteModelById
-############################
+# Delete Model By Id
 
 
 @router.post('/model/delete', response_model=bool)

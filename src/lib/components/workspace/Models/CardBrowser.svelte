@@ -2,10 +2,11 @@
 	import CardText from './CardText.svelte';
 	import { cardPlainText } from '$lib/utils/cardText';
 	import { getContext, onMount } from 'svelte';
-	import { goto } from '$app/navigation';
+	import { getPageContext } from '$lib/utils/page';
+	const { goto } = getPageContext();
 	import { toast } from 'svelte-sonner';
 
-	import { config, models, settings, user } from '$lib/stores';
+	import { models, user } from '$lib/stores';
 	import { getModels } from '$lib/apis';
 	import {
 		getCardSources,
@@ -212,12 +213,7 @@
 	};
 
 	const refreshModels = async () => {
-		await models.set(
-			await getModels(
-				localStorage.token,
-				($config?.features?.enable_direct_connections && $settings?.directConnections) || null
-			)
-		);
+		await models.set(await getModels(localStorage.token));
 	};
 
 	const runImport = async (key: string, form: { source?: string; id?: string; url?: string }) => {

@@ -27,8 +27,11 @@
 	/** CSS classes for the dropdown content container */
 	export let contentClass = '';
 
-	/** Max height for the dropdown content */
-	export let maxHeight = 'min(32rem, calc(100dvh - 2rem))';
+	const DEFAULT_MAX_HEIGHT = 'min(32rem, calc(100dvh - 2rem))';
+
+	/** Max height for the dropdown content; undefined uses the default */
+	export let maxHeight: string | undefined = undefined;
+	$: effectiveMaxHeight = maxHeight ?? DEFAULT_MAX_HEIGHT;
 
 	/** Side offset in px */
 	export let sideOffset = 4;
@@ -37,22 +40,20 @@
 	export let visualViewportAware = false;
 
 	let triggerEl: HTMLElement | null = null;
+	let triggerControl: HTMLElement | null = null;
 	let contentEl: HTMLElement | null = null;
 	let previouslyFocused: HTMLElement | null = null;
 	let shouldFocusContent = false;
 	let positionFrame: number | undefined;
 	let settleTimers: number[] = [];
-	let resolvedMaxHeight = maxHeight;
+	let resolvedMaxHeight = maxHeight ?? DEFAULT_MAX_HEIGHT;
 	let lastContentHeight = 0;
 
 	/** Svelte action: moves the node to document.body and keeps it positioned as it resizes */
 	function portal(node: HTMLElement) {
 		document.body.appendChild(node);
 
-		// Content can grow after the dropdown is positioned - a submenu is opened, or an
-		// async list finishes loading - which would otherwise leave it overflowing the
-		// viewport. Compare scrollHeight (the natural content height) so that clamping
-		// max-height here cannot feed back into another reposition.
+		// Track scrollHeight as content grows; max-height clamping must not trigger a reposition loop.
 		const resizeObserver = new ResizeObserver(() => {
 			if (node.scrollHeight === lastContentHeight) return;
 			lastContentHeight = node.scrollHeight;
@@ -60,9 +61,14 @@
 		});
 		resizeObserver.observe(node);
 
+		// Items can render after the menu opens, e.g. an async list.
+		const mutationObserver = new MutationObserver(markMenuItems);
+		mutationObserver.observe(node, { childList: true, subtree: true });
+
 		return {
 			destroy() {
 				resizeObserver.disconnect();
+				mutationObserver.disconnect();
 				lastContentHeight = 0;
 				if (node.parentNode) {
 					node.parentNode.removeChild(node);
@@ -72,8 +78,13 @@
 	}
 
 	/** Svelte action: captures the first child element as the trigger reference */
-	function trigger(node: HTMLElement) {
+	function trigger(node: HTMLElement, expanded: boolean) {
 		triggerEl = (node.firstElementChild as HTMLElement | null) || node;
+		triggerControl = node.querySelector<HTMLElement>(
+			'button, a[href], [tabindex]:not([tabindex="-1"])'
+		);
+		triggerControl?.setAttribute('aria-haspopup', 'true');
+		triggerControl?.setAttribute('aria-expanded', String(expanded));
 		function handleClick(e: MouseEvent) {
 			e.preventDefault();
 			toggleOpen();
@@ -81,12 +92,16 @@
 		function handleKeydown(e: KeyboardEvent) {
 			if (e.key === 'Enter' || e.key === ' ') {
 				e.preventDefault();
-				toggleOpen();
+				if (show) closeDropdown();
+				else openDropdown(true);
 			}
 		}
 		node.addEventListener('click', handleClick);
 		node.addEventListener('keydown', handleKeydown);
 		return {
+			update(expanded: boolean) {
+				triggerControl?.setAttribute('aria-expanded', String(expanded));
+			},
 			destroy() {
 				node.removeEventListener('click', handleClick);
 				node.removeEventListener('keydown', handleKeydown);
@@ -118,7 +133,7 @@
 	function positionContentDefault() {
 		if (!triggerEl || !contentEl) return;
 		const rect = (anchorElement ?? triggerEl).getBoundingClientRect();
-		resolvedMaxHeight = maxHeight;
+		resolvedMaxHeight = effectiveMaxHeight;
 
 		contentEl.style.position = 'fixed';
 		contentEl.style.zIndex = '9999';
@@ -194,19 +209,27 @@
 		const preferredTop = openAbove
 			? rect.top - constrainedHeight - sideOffset
 			: rect.bottom + sideOffset;
-		const contentWidth = contentEl.offsetWidth || 0;
+		const contentWidth = Math.max(contentEl.scrollWidth || 0, contentEl.offsetWidth || 0);
 		const preferredLeft = align === 'end' && contentWidth ? rect.right - contentWidth : rect.left;
 		const maxLeft = contentWidth ? viewportRight - contentWidth - pad : preferredLeft;
 
-		contentEl.style.top = `${Math.max(
+		const top = Math.max(
 			viewport.top + pad,
 			Math.min(preferredTop, viewportBottom - pad - constrainedHeight)
-		)}px`;
-		contentEl.style.bottom = 'auto';
+		);
+		if (openAbove) {
+			contentEl.style.bottom = `${window.innerHeight - top - constrainedHeight}px`;
+			contentEl.style.top = 'auto';
+		} else {
+			contentEl.style.top = `${top}px`;
+			contentEl.style.bottom = 'auto';
+		}
 		contentEl.style.left = `${Math.max(viewport.left + pad, Math.min(preferredLeft, maxLeft))}px`;
 		contentEl.style.right = 'auto';
 		resolvedMaxHeight =
-			contentHeight > availableHeight ? `min(${maxHeight}, ${availableHeight}px)` : maxHeight;
+			contentHeight > availableHeight
+				? `min(${effectiveMaxHeight}, ${availableHeight}px)`
+				: effectiveMaxHeight;
 		contentEl.style.maxHeight = resolvedMaxHeight;
 	}
 
@@ -235,8 +258,15 @@
 		}
 	}
 
+	function markMenuItems() {
+		contentEl
+			?.querySelectorAll('button:not([role]), a[href]:not([role])')
+			.forEach((item) => item.setAttribute('role', 'menuitem'));
+	}
+
 	async function afterOpen() {
 		await tick();
+		markMenuItems();
 		positionContent();
 
 		// Re-check after transition renders real dimensions
@@ -248,7 +278,16 @@
 
 		if (shouldFocusContent) {
 			shouldFocusContent = false;
-			contentEl?.focus();
+			const firstControl = contentEl?.querySelector<HTMLElement>(
+				'button:not([disabled]), a[href], input'
+			);
+			(
+				(firstControl?.matches('input')
+					? firstControl
+					: contentEl?.querySelector<HTMLElement>('[role^="menuitem"]:not([disabled])')) ??
+				firstControl ??
+				contentEl
+			)?.focus();
 		}
 	}
 
@@ -262,6 +301,8 @@
 		show = true;
 		onOpenChange(true);
 	}
+
+	export const openWithFocus = () => openDropdown(true);
 
 	function closeDropdown(restoreFocus = !!contentEl?.contains(document.activeElement)) {
 		if (!show) return;
@@ -302,9 +343,12 @@
 		if (!(event.target instanceof Node)) return;
 		if (triggerEl?.contains(event.target)) return;
 		if (contentEl?.contains(event.target)) return;
-		// Submenus and listboxes can be portaled outside contentEl.
-		if (event.target instanceof Element && event.target.closest('[role="menu"], [role="listbox"]'))
-			return;
+		// Submenus, listboxes and modals can be portaled outside contentEl.
+		const portaled =
+			event.target instanceof Element
+				? event.target.closest('[role="menu"], [role="listbox"], [aria-modal="true"]')
+				: null;
+		if (portaled && !portaled.contains(triggerEl)) return;
 		event.preventDefault();
 		event.stopPropagation();
 		closeDropdown(false);
@@ -313,6 +357,27 @@
 	function handleKeydown(event: KeyboardEvent) {
 		if (event.key === 'Escape' && show) {
 			closeDropdown();
+		}
+
+		if (
+			['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) &&
+			event.target instanceof HTMLElement &&
+			event.target.matches('[role^="menuitem"]') &&
+			contentEl?.contains(event.target)
+		) {
+			const items = [
+				...contentEl.querySelectorAll<HTMLElement>('[role^="menuitem"]:not([disabled])')
+			].filter((item) => item.getClientRects().length > 0);
+			const index = items.indexOf(event.target);
+			const nextIndex =
+				event.key === 'Home'
+					? 0
+					: event.key === 'End'
+						? items.length - 1
+						: (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+
+			event.preventDefault();
+			items[nextIndex]?.focus();
 		}
 	}
 
@@ -347,11 +412,11 @@
 />
 
 <span
-	use:trigger
+	use:trigger={show}
 	style="display: contents; cursor: pointer;"
-	role="button"
-	aria-haspopup="true"
-	aria-expanded={show}
+	role={triggerControl ? undefined : 'button'}
+	aria-haspopup={triggerControl ? undefined : 'true'}
+	aria-expanded={triggerControl ? undefined : show}
 >
 	<slot />
 </span>
@@ -361,7 +426,7 @@
 	<div
 		use:portal
 		bind:this={contentEl}
-		class={contentClass}
+		class="no-drag-region {contentClass}"
 		role="menu"
 		tabindex="-1"
 		style:max-height={resolvedMaxHeight}
@@ -372,6 +437,7 @@
 			if (closeOnSelect && !e.defaultPrevented) closeDropdown();
 		}}
 		on:pointerdown={(e) => e.stopPropagation()}
+		on:keydown={handleKeydown}
 	>
 		<slot name="content" />
 	</div>

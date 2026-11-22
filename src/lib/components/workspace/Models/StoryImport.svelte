@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
-	import { goto } from '$app/navigation';
+	import { getPageContext } from '$lib/utils/page';
+	const { goto } = getPageContext();
 	import { toast } from 'svelte-sonner';
 
-	import { config, models, settings } from '$lib/stores';
+	import { models } from '$lib/stores';
 	import { getModels } from '$lib/apis';
 	import {
 		analyzeStory,
@@ -178,12 +179,7 @@
 				lorebook: entries.length ? { name: lorebookName, entries } : null
 			});
 			toast.success($i18n.t('Created {{COUNT}} character(s)', { COUNT: created.length }));
-			await models.set(
-				await getModels(
-					localStorage.token,
-					($config?.features?.enable_direct_connections && $settings?.directConnections) || null
-				)
-			);
+			await models.set(await getModels(localStorage.token));
 			goto('/workspace/models');
 		} catch (error: any) {
 			toast.error(`${error?.detail ?? error}`);

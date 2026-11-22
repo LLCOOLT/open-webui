@@ -1,7 +1,8 @@
 <script lang="ts">
+	import { v4 as uuidv4 } from 'uuid';
 	import { onDestroy, getContext, tick, type Snippet } from 'svelte';
 	import { toast } from 'svelte-sonner';
-	import { createFocusTrap } from 'focus-trap';
+	import { copyToClipboard } from '$lib/utils';
 	import { mobile } from '$lib/stores';
 	import Drawer from '$lib/components/common/Drawer.svelte';
 	import ResizableSidePanel from '$lib/components/common/ResizableSidePanel.svelte';
@@ -21,6 +22,7 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import FileCodeEditor from '$lib/components/chat/FileNav/FileCodeEditor.svelte';
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import DiffEditorModal from '$lib/components/common/DiffEditorModal.svelte';
 	import {
 		getSkillFiles,
 		getSkillFile,
@@ -30,6 +32,8 @@
 		type SkillFileOperation
 	} from '$lib/apis/skills';
 	import type { FileEntry } from '$lib/apis/terminal';
+	import { readDroppedFiles, type DroppedEntry } from '$lib/utils/drop';
+	import FilesOverlay from '$lib/components/chat/MessageInput/FilesOverlay.svelte';
 
 	export let version: Snippet;
 	export let exports: Snippet;
@@ -60,6 +64,8 @@
 	let showFileDrawer = false;
 	let sidebarWidth = 256;
 	let codeEditor: FileCodeEditor | undefined;
+	let showComparison = false;
+	let comparison: { path: string; content: string; key: string; request: number } | null = null;
 	let value = '';
 	let loadedValue = '';
 	let loadedPath = '';
@@ -78,7 +84,7 @@
 	let newName = '';
 	let newNameInput: HTMLInputElement;
 	let dialog = { show: false, title: '', input: false, value: '', action: (_: string) => {} };
-	const dragType = `application/x-skill-file-${crypto.randomUUID()}`;
+	const dragType = `application/x-skill-file-${uuidv4()}`;
 
 	const ask = (title: string, input: boolean, action: (value: string) => void, value = '') => {
 		dialog = { show: true, title, input, value, action };
@@ -149,16 +155,34 @@
 			dirty = true;
 		}
 	};
-	const fileDrawer = (node: HTMLElement) => {
-		const trap = createFocusTrap(node, { escapeDeactivates: false });
-		trap.activate();
-		return {
-			destroy: () => {
-				flush();
-				trap.deactivate();
-			}
-		};
+	const copyContent = async () => {
+		if (loading || loadError || !loadedPath || objectUrl) return;
+		if (await copyToClipboard(codeEditor?.getValue() ?? value))
+			toast.success($i18n.t('Copied to clipboard'));
+		else toast.error($i18n.t('Could not copy to clipboard. Please try again.'));
 	};
+	const compareRevision = () => {
+		if (readOnly || loading || loadError || !loadedPath || objectUrl) return;
+		flush();
+		comparison = { path: loadedPath, content: value, key: loadKey, request: requestId };
+		preview = false;
+		showComparison = true;
+	};
+	const applyComparison = (content: string) => {
+		if (
+			readOnly ||
+			!comparison ||
+			comparison.path !== loadedPath ||
+			comparison.key !== loadKey ||
+			comparison.request !== requestId ||
+			!files.some((file) => file.path === comparison?.path)
+		)
+			throw new Error($i18n.t('The file has changed. Reopen the comparison before applying.'));
+		codeEditor?.setValue(content);
+		value = content;
+		flush();
+	};
+	const fileDrawer = () => ({ destroy: flush });
 	$: if (!$mobile) showFileDrawer = false;
 	$: if (loadedPath && value !== loadedValue && !readOnly) {
 		dirty = true;
@@ -393,14 +417,16 @@
 		dirty = true;
 		if (!files.some((f) => f.path === selected)) open('SKILL.md');
 	};
-	const upload = async (uploads: File[]) => {
+	/** Adds files at their paths under the open folder; a folder without `file` is kept even if empty. */
+	const upload = async (uploads: DroppedEntry[]) => {
 		if (readOnly) return;
 		flush();
 		try {
 			const drafts: Draft[] = [];
-			for (const file of uploads) {
+			for (const { path: relativePath, file } of uploads) {
+				if (!file) continue;
 				if (file.size > 10 * 1024 * 1024) throw new Error('Files must be at most 10 MiB');
-				const path = currentPath + (file.webkitRelativePath || file.name);
+				const path = currentPath + relativePath;
 				const bytes = new Uint8Array(await file.arrayBuffer());
 				let text: string | undefined;
 				try {
@@ -418,12 +444,53 @@
 				});
 			}
 			validatePaths([...files.map((f) => f.path), ...drafts.map((f) => f.path)]);
+			// Only dropped folders that end up empty need keeping; the rest show through their files.
+			const dropped = uploads
+				.filter((entry) => !entry.file)
+				.map((entry) => currentPath + entry.path);
+			const paths = [...files, ...drafts].map((f) => f.path).concat(dropped, emptyFolders);
+			const folders = dropped.filter(
+				(folder) => !emptyFolders.includes(folder) && !paths.some((p) => p.startsWith(folder + '/'))
+			);
+			if (!drafts.length && !folders.length) return;
 			files = [...files, ...drafts];
+			emptyFolders = [...emptyFolders, ...folders];
 			dirty = true;
 		} catch (error) {
 			toast.error(skillError(error));
 		}
 	};
+	const fromInput = (list: FileList | null): DroppedEntry[] =>
+		Array.from(list ?? []).map((file) => ({ path: file.webkitRelativePath || file.name, file }));
+
+	// Files and folders dropped anywhere on the skill upload into the open folder, like the buttons.
+	let dragging = false;
+	const isFileDrag = (event: DragEvent) =>
+		!readOnly && (event.dataTransfer?.types.includes('Files') ?? false);
+	const dragOver = (event: DragEvent) => {
+		if (!isFileDrag(event)) return;
+		// Capture phase, so the code editor doesn't paste the file's text instead.
+		event.preventDefault();
+		event.stopPropagation();
+		if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+		dragging = true;
+	};
+	const dragLeave = (event: DragEvent) => {
+		if (!(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node))
+			dragging = false;
+	};
+	const drop = async (event: DragEvent) => {
+		dragging = false;
+		if (!isFileDrag(event) || !event.dataTransfer) return;
+		event.preventDefault();
+		event.stopPropagation();
+		try {
+			await upload(await readDroppedFiles(event.dataTransfer));
+		} catch (error) {
+			toast.error(skillError(error));
+		}
+	};
+
 	const download = async (path: string) => {
 		flush();
 		const file = files.find((f) => f.path === path);
@@ -479,6 +546,14 @@
 	});
 </script>
 
+<DiffEditorModal
+	bind:show={showComparison}
+	initialContent={comparison?.content ?? ''}
+	filePath={comparison?.path ?? null}
+	onApply={applyComparison}
+	onClose={() => (comparison = null)}
+/>
+
 <ConfirmDialog
 	bind:show={dialog.show}
 	title={dialog.title}
@@ -493,7 +568,7 @@
 	bind:this={folderInput}
 	hidden
 	on:change={() => {
-		upload(Array.from(folderInput.files || []));
+		upload(fromInput(folderInput.files));
 		folderInput.value = '';
 	}}
 />
@@ -503,11 +578,19 @@
 	hidden
 	bind:this={uploadInput}
 	on:change={() => {
-		if (!readOnly) upload(Array.from(uploadInput.files || []));
+		if (!readOnly) upload(fromInput(uploadInput.files));
 		uploadInput.value = '';
 	}}
 />
-<div class="flex h-full min-h-0 flex-col">
+<div
+	class="relative flex h-full min-h-0 flex-col"
+	role="region"
+	aria-label={$i18n.t('Files')}
+	on:dragover|capture={dragOver}
+	on:dragleave={dragLeave}
+	on:drop|capture={drop}
+>
+	<FilesOverlay show={dragging} />
 	<div class="flex min-h-0 flex-1 flex-col md:flex-row">
 		{#if $mobile}
 			{@render fileList()}
@@ -530,15 +613,8 @@
 </div>
 
 {#if $mobile}
-	<Drawer bind:show={showFileDrawer} className="h-full" onClose={flush}>
-		<div
-			class="h-full"
-			role="dialog"
-			aria-modal="true"
-			aria-label={selected}
-			tabindex="-1"
-			use:fileDrawer
-		>
+	<Drawer bind:show={showFileDrawer} className="h-full" ariaLabel={selected} onClose={flush}>
+		<div class="h-full" use:fileDrawer>
 			{@render fileContent()}
 		</div>
 	</Drawer>
@@ -563,18 +639,33 @@
 				</button>
 			{/if}
 			<span class="min-w-0 flex-1 truncate text-gray-500" title={selected}>{selected}</span>
+			{#if !readOnly && loadedPath && !objectUrl && !loading && !loadError}
+				<button
+					type="button"
+					class="rounded-lg px-1.5 py-0.5 text-gray-500 transition hover:text-gray-900 dark:hover:text-gray-100"
+					on:click={compareRevision}>{$i18n.t('Compare revision')}</button
+				>
+			{/if}
 			{#if /\.md$/i.test(selected) && !loading}<button
 					type="button"
 					class="rounded-lg px-1.5 py-0.5 text-gray-500 transition hover:text-gray-900 dark:hover:text-gray-100"
 					on:click={async () => {
 						preview = !preview;
 						if (preview) await renderPreview();
-					}}>{preview ? 'Edit' : 'Preview'}</button
+					}}>{preview ? $i18n.t('Edit') : $i18n.t('Preview')}</button
 				>{/if}
+			{#if loadedPath && !objectUrl && !loading && !loadError}
+				<button
+					type="button"
+					aria-label={$i18n.t('Copy content')}
+					class="shrink-0 rounded-lg px-1.5 py-0.5 text-gray-500 transition hover:text-gray-900 dark:hover:text-gray-100"
+					on:click={copyContent}>{$i18n.t('Copy')}</button
+				>
+			{/if}
 			<button
 				type="button"
 				class="rounded-lg px-1.5 py-0.5 text-gray-500 transition hover:text-gray-900 dark:hover:text-gray-100"
-				on:click={() => download(selected)}>Download</button
+				on:click={() => download(selected)}>{$i18n.t('Download')}</button
 			>
 		</div>
 		{#if loadError}<p role="alert" class="p-3 text-red-500">{loadError}</p>
@@ -591,7 +682,9 @@
 					sandbox=""
 					class="min-h-0 flex-1"
 				></iframe>
-			{:else}<p class="p-3 text-xs text-gray-500">Binary file. Download to open.</p>{/if}
+			{:else}<p class="p-3 text-xs text-gray-500">
+					{$i18n.t('Binary file. Download to open.')}
+				</p>{/if}
 		{:else if preview}
 			<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 			<div
@@ -602,7 +695,7 @@
 						event.preventDefault();
 						const path = link.dataset.skillPath!;
 						if (files.some((f) => f.path === path)) open(path);
-						else toast.error('File not found');
+						else toast.error($i18n.t('File not found.'));
 					}
 				}}
 			>
@@ -747,10 +840,10 @@
 				type="button"
 				class="px-2 text-xs"
 				on:click={() =>
-					ask('Delete selected files?', false, () => {
+					ask($i18n.t('Delete selected files?'), false, () => {
 						selectedPaths.forEach(remove);
 						selectedPaths = new Set();
-					})}>Delete selected</button
+					})}>{$i18n.t('Delete selected')}</button
 			>{/if}
 		{#if !currentPath}{@render createInput()}{/if}
 		<ul>
@@ -777,7 +870,9 @@
 					onToggleExpand={toggleFolder}
 					onRename={(path, name) => rename(path, path.slice(0, path.lastIndexOf('/') + 1) + name)}
 					onDelete={(path) =>
-						ask('Delete this file or folder?', false, () => remove(path.replace(/\/$/, '')))}
+						ask($i18n.t('Delete this file or folder?'), false, () =>
+							remove(path.replace(/\/$/, ''))
+						)}
 					onMove={(paths, destination) =>
 						paths.forEach((path) => {
 							path = path.replace(/\/$/, '');
@@ -791,7 +886,7 @@
 			{/each}
 		</ul>
 		{#if !rows.length}<p class="p-3 text-xs text-gray-500">
-				Empty folders are saved when they contain files.
+				{$i18n.t('Empty folders are saved when they contain files.')}
 			</p>{/if}
 	</div>
 {/snippet}

@@ -30,14 +30,7 @@
 		if (result) {
 			evaluationConfig = result;
 			toast.success($i18n.t('Settings saved successfully!'));
-			models.set(
-				await getModels(
-					localStorage.token,
-					$config?.features?.enable_direct_connections
-						? ($settings?.directConnections ?? null)
-						: null
-				)
-			);
+			models.set(await getModels(localStorage.token));
 		}
 		return !!result;
 	};
@@ -64,12 +57,7 @@
 		);
 
 		await submitHandler();
-		models.set(
-			await getModels(
-				localStorage.token,
-				$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
-			)
-		);
+		models.set(await getModels(localStorage.token));
 	};
 
 	onMount(async () => {
@@ -121,6 +109,7 @@
 
 						<Tooltip content={$i18n.t('settings.admin.evaluations.addArenaModel.label')}>
 							<button
+								aria-label={$i18n.t('settings.admin.evaluations.addArenaModel.label')}
 								class="flex size-6 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-black/5 hover:text-gray-900 dark:text-gray-600 dark:hover:bg-white/5 dark:hover:text-white"
 								type="button"
 								on:click={() => {
@@ -138,6 +127,7 @@
 								<Model
 									{model}
 									onEdit={(model) => editModelHandler(model, index)}
+									onClone={addModelHandler}
 									on:delete={(e) => {
 										deleteModelHandler(index);
 									}}

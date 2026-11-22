@@ -2,7 +2,7 @@
 	import { resolveLocalizedResource } from '$lib/utils/localizedContent';
 	import { toast } from 'svelte-sonner';
 
-	import { config, functions, models, settings, tools, user } from '$lib/stores';
+	import { config, functions, settings, tools, user } from '$lib/stores';
 	import { createEventDispatcher, onMount, getContext, tick } from 'svelte';
 
 	import {
@@ -21,6 +21,9 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Valves from '$lib/components/common/Valves.svelte';
+	import { getChatContext } from '$lib/components/chat/context';
+
+	const { models } = getChatContext();
 
 	const dispatch = createEventDispatcher();
 
@@ -28,7 +31,7 @@
 
 	export let show = false;
 
-	let tab = 'tools';
+	let tab = $config?.features?.enable_tools ? 'tools' : 'functions';
 	let selectedId = '';
 
 	let loading = false;
@@ -89,6 +92,11 @@
 							.map((v) => v.trim())
 							.filter((v) => v.length > 0);
 					} else if (valves[property] == null) {
+						valves[property] = null;
+					}
+				} else if (valves[property] === '') {
+					const types = (valvesSpec.properties[property]?.anyOf ?? []).map((inner) => inner.type);
+					if (types.includes('null') && !types.includes('string')) {
 						valves[property] = null;
 					}
 				}
@@ -164,19 +172,27 @@
 					<div class="flex-1">
 						<select
 							class="w-full rounded-sm py-1 px-1 text-xs bg-transparent outline-hidden"
+							aria-label={$i18n.t('Type')}
 							bind:value={tab}
 							placeholder={$i18n.t('Select')}
 						>
-							<option value="tools" class="bg-gray-100 dark:bg-gray-800">{$i18n.t('Tools')}</option>
-							<option value="functions" class="bg-gray-100 dark:bg-gray-800"
-								>{$i18n.t('Functions')}</option
-							>
+							{#if $config?.features?.enable_tools}
+								<option value="tools" class="bg-gray-100 dark:bg-gray-800"
+									>{$i18n.t('Tools')}</option
+								>
+							{/if}
+							{#if $config?.features?.enable_functions}
+								<option value="functions" class="bg-gray-100 dark:bg-gray-800"
+									>{$i18n.t('Functions')}</option
+								>
+							{/if}
 						</select>
 					</div>
 
 					<div class="flex-1">
 						<select
 							class="w-full rounded-sm py-1 px-1 text-xs bg-transparent outline-hidden"
+							aria-label={tab === 'tools' ? $i18n.t('Select a tool') : $i18n.t('Select a function')}
 							bind:value={selectedId}
 							on:change={async () => {
 								await tick();

@@ -70,7 +70,7 @@ async def _filter_grants(form_data: LorebookForm, user, db: AsyncSession) -> Non
             user.id,
             user.role,
             form_data.access_grants,
-            'sharing.public_lorebooks',
+            'lorebook',
             db=db,
         )
 

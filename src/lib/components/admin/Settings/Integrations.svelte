@@ -29,8 +29,6 @@
 	import AdminSettingRow from './AdminSettingRow.svelte';
 
 	import {
-		getConnectionsConfig,
-		setConnectionsConfig,
 		getToolServerConnections,
 		setToolServerConnections,
 		getTerminalServerConnections,
@@ -50,24 +48,12 @@
 	};
 
 	let servers: ToolServerConnection[] | null = null;
-	let connectionsConfig: any = null;
 	let showConnectionModal = false;
 
 	// Terminal server admin connections
 	let terminalConnections: TerminalConnection[] = [];
 	let showAddTerminalModal = false;
 	let editTerminalIdx: number | null = null;
-
-	const updateDirectIntegrations = async () => {
-		const res = await setConnectionsConfig(localStorage.token, connectionsConfig).catch((error) => {
-			toast.error(`${error}`);
-		});
-
-		if (res) {
-			toast.success($i18n.t('Connections settings updated'));
-			await config.set(await getBackendConfig());
-		}
-	};
 
 	const addConnectionHandler = async (server: ToolServerConnection) => {
 		servers = [...(servers ?? []), server];
@@ -97,30 +83,23 @@
 
 		if (res) {
 			toast.success($i18n.t('Terminal servers saved'));
+			await config.set(await getBackendConfig());
 
 			// Refresh the terminalServers store so changes are reflected immediately
-			// Preserve user direct terminals, refresh system terminals from backend
-			const existingDirectTerminals = (($terminalServers ?? []) as TerminalConnection[]).filter(
-				(t) => !t.id
-			);
 			const systemTerminals = await getTerminalServers(localStorage.token);
 			const systemEntries = systemTerminals.map((t) => ({
-				id: t.id,
+				...t,
 				url: `${WEBUI_API_BASE_URL}/terminals/${t.id}`,
 				name: t.name,
 				key: localStorage.token,
-				contexts: t.contexts ?? {},
 				config: t.config ?? {}
 			}));
-			terminalServers.set([...existingDirectTerminals, ...systemEntries] as any);
+			terminalServers.set(systemEntries as any);
 		}
 	};
 
 	const addTerminalConnection = (server: TerminalConnection) => {
-		terminalConnections = [
-			...terminalConnections,
-			{ ...server, id: server.id ?? crypto.randomUUID?.() ?? uuidv4() }
-		];
+		terminalConnections = [...terminalConnections, { ...server, id: server.id ?? uuidv4() }];
 		saveTerminalServers();
 	};
 
@@ -137,7 +116,6 @@
 	};
 
 	onMount(async () => {
-		connectionsConfig = await getConnectionsConfig(localStorage.token);
 		const res = await getToolServerConnections(localStorage.token);
 		servers = res.TOOL_SERVER_CONNECTIONS as ToolServerConnection[];
 
@@ -185,7 +163,7 @@
 	</h2>
 
 	<div class="flex-1 min-h-0 overflow-y-auto scrollbar-hover pr-1.5">
-		{#if servers !== null && connectionsConfig !== null}
+		{#if servers !== null}
 			<fieldset
 				disabled={!$config?.features?.enable_tool_servers}
 				class="min-w-0 disabled:opacity-50"
@@ -202,6 +180,7 @@
 
 							<Tooltip content={$i18n.t('settings.admin.integrations.addConnection.label')}>
 								<button
+									aria-label={$i18n.t('settings.admin.integrations.addConnection.label')}
 									class="flex size-6 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-black/5 hover:text-gray-900 dark:text-gray-600 dark:hover:bg-white/5 dark:hover:text-white"
 									on:click={() => {
 										showConnectionModal = true;
@@ -249,6 +228,7 @@
 
 							<Tooltip content={$i18n.t('settings.admin.integrations.addConnection.label')}>
 								<button
+									aria-label={$i18n.t('settings.admin.integrations.addConnection.label')}
 									class="flex size-6 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-black/5 hover:text-gray-900 dark:text-gray-600 dark:hover:bg-white/5 dark:hover:text-white"
 									on:click={() => {
 										editTerminalIdx = null;
@@ -263,7 +243,7 @@
 
 						<div class="flex flex-col gap-1.5">
 							{#each terminalConnections as connection, idx}
-								<div class="flex w-full gap-2 items-center">
+								<div class="group/setting-row flex w-full gap-2 items-center">
 									<Tooltip className="w-full relative" content={''} placement="top-start">
 										<div class="flex w-full">
 											<div
@@ -278,11 +258,12 @@
 													<Cloud className="size-4" strokeWidth="1.5" />
 												</Tooltip>
 
-												<div
-													class="outline-hidden w-full bg-transparent text-xs text-gray-700 dark:text-gray-300"
+												<label
+													for={`terminal-${idx}-control`}
+													class="outline-hidden w-full bg-transparent text-xs text-gray-600 dark:text-gray-400 transition-colors duration-150 group-hover/setting-row:text-gray-900 group-focus-within/setting-row:text-gray-900 dark:group-hover/setting-row:text-white dark:group-focus-within/setting-row:text-white group-has-[button[id$=-control]:enabled]/setting-row:cursor-pointer group-has-[button[id$=-control]:disabled]/setting-row:cursor-not-allowed"
 												>
 													{connection.name || connection.url || $i18n.t('New Terminal')}
-												</div>
+												</label>
 											</div>
 										</div>
 									</Tooltip>
@@ -290,6 +271,7 @@
 									<div class="flex gap-1 items-center">
 										<Tooltip content={$i18n.t('Configure')}>
 											<button
+												aria-label={$i18n.t('Configure')}
 												class="self-center p-1 bg-transparent hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition"
 												on:click={() => {
 													editTerminalIdx = idx;
@@ -307,6 +289,7 @@
 												: $i18n.t('Disabled')}
 										>
 											<Switch
+												id={`terminal-${idx}-control`}
 												state={connection?.enabled !== false}
 												on:change={() => {
 													terminalConnections = terminalConnections.map((c, i) =>
@@ -329,7 +312,7 @@
 
 						<div class="mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600">
 							{$i18n.t(
-								'Connect to Open Terminal instances. Admins and users granted access can use file browsing and terminal tools through these servers.'
+								'Connect to Open Terminal servers. Admins and users granted access can use file browsing and terminal tools through these servers.'
 							)}
 						</div>
 						<a
@@ -343,23 +326,6 @@
 
 			<AdminSettingSection title={$i18n.t('settings.admin.integrations.sections.knowledge.title')}>
 				<ExternalKnowledge />
-			</AdminSettingSection>
-
-			<AdminSettingSection
-				title={$i18n.t('settings.admin.connections.sections.userConnections.title')}
-			>
-				<AdminSettingRow
-					label={$i18n.t('settings.admin.connections.directIntegrations.label')}
-					description={$i18n.t('settings.admin.connections.directIntegrations.description')}
-					let:labelId
-				>
-					<Switch
-						disabled={!$config?.features?.enable_tool_servers}
-						bind:state={connectionsConfig.ENABLE_DIRECT_INTEGRATIONS}
-						on:change={updateDirectIntegrations}
-						ariaLabelledbyId={labelId}
-					/>
-				</AdminSettingRow>
 			</AdminSettingSection>
 		{:else}
 			<div class="flex h-full justify-center">

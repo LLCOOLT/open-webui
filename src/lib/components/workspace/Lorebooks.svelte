@@ -1,11 +1,12 @@
 <script lang="ts">
 	import { getContext, onMount } from 'svelte';
-	import { goto } from '$app/navigation';
+	import type { WorkspaceContext } from '$lib/types';
+	import { getPageContext } from '$lib/utils/page';
 	import { toast } from 'svelte-sonner';
 	import fileSaver from 'file-saver';
 	const { saveAs } = fileSaver;
 
-	import { WEBUI_NAME, user, workspaceActions, workspaceCounts } from '$lib/stores';
+	import { WEBUI_NAME, user } from '$lib/stores';
 	import {
 		deleteLorebookById,
 		exportLorebook,
@@ -23,6 +24,8 @@
 	import Pencil from '$lib/components/icons/Pencil.svelte';
 
 	const i18n: any = getContext('i18n');
+	const { goto } = getPageContext();
+	const { workspaceActions, workspaceCounts } = getContext<WorkspaceContext>('workspace');
 
 	let lorebooks: Lorebook[] | null = null;
 	let query = '';

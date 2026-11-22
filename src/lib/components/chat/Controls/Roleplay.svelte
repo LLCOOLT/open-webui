@@ -2,7 +2,8 @@
 	import { getContext, onDestroy, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
-	import { chatId, chatPersonaId, settings } from '$lib/stores';
+	import { chatPersonaId, settings } from '$lib/stores';
+	import { getChatContext } from '$lib/components/chat/context';
 	import {
 		createLorebook,
 		getChatMemory,
@@ -27,6 +28,7 @@
 	import Textarea from '$lib/components/common/Textarea.svelte';
 
 	const i18n: any = getContext('i18n');
+	const { chatId } = getChatContext();
 
 	export let models: any[] = [];
 

@@ -1,4 +1,11 @@
 <script lang="ts">
+	import { resolveTerminalTarget } from '$lib/apis/terminal';
+	import type { TerminalContext } from '$lib/types';
+	import {
+		estimateTokens,
+		estimateMessagesTokens,
+		estimateUsageGrowth
+	} from '$lib/utils/contextUsage';
 	import { resolveLocalizedFunction } from '$lib/utils/localizedContent';
 	import { functions as localizedFunctions } from '$lib/stores';
 	import DOMPurify from 'dompurify';
@@ -16,6 +23,7 @@
 	dayjs.extend(relativeTime);
 
 	import { onMount, tick, getContext, createEventDispatcher } from 'svelte';
+	import type { Writable } from 'svelte/store';
 
 	import { createPicker, getAuthToken } from '$lib/utils/google-drive-picker';
 	import { pickAndDownloadFile } from '$lib/utils/onedrive-file-picker';
@@ -27,28 +35,29 @@
 		type Model,
 		mobile,
 		settings,
-		models,
 		config,
-		showCallOverlay,
+		voiceCall,
 		tools,
 		skills,
-		terminalSkills,
-		toolServers,
 		terminalServers,
 		user as _user,
-		showControls,
+		showTabs,
 		showSettings,
 		showFileNavDir,
-		selectedTerminalId,
 		TTSWorker,
-		temporaryChatEnabled,
-		chatPersonaId
+		chatPersonaId,
+		chatTabRequest,
+		visibleControls,
+		imageModels,
+		videoModels
 	} from '$lib/stores';
 
 	import {
 		convertHeicToJpeg,
 		isHeicImage,
+		normalizeImageFile,
 		compressImage,
+		copyToClipboard,
 		createMessagesList,
 		extractContentFromFile,
 		extractCurlyBraceWords,
@@ -64,7 +73,13 @@
 		isRasterImageContentType
 	} from '$lib/utils';
 	import { uploadFile } from '$lib/apis/files';
-	import { getCwd, uploadNewFileToTerminal } from '$lib/apis/terminal';
+	import {
+		filesystemFile,
+		getCwd,
+		templatesApi,
+		uploadNewFileToTerminal
+	} from '$lib/apis/terminal';
+	import { isSavedChatId } from '$lib/utils/chatId';
 	import { generateAutoCompletion } from '$lib/apis';
 	import { deleteFileById } from '$lib/apis/files';
 	import { getChatById } from '$lib/apis/chats';
@@ -99,6 +114,7 @@
 	import PencilSquare from '../icons/PencilSquare.svelte';
 	import { impersonateUser } from '$lib/apis/lorebooks';
 	import { getOutputText } from './Messages/structuredOutput';
+	import VideoCamera from '../icons/VideoCamera.svelte';
 	import Wrench from '../icons/Wrench.svelte';
 	import ArrowUpLeft from '../icons/ArrowUpLeft.svelte';
 	import Cube from '../icons/Cube.svelte';
@@ -110,7 +126,6 @@
 	import Terminal from '../icons/Terminal.svelte';
 	import IntegrationsMenu from './MessageInput/IntegrationsMenu.svelte';
 	import TerminalMenu from './MessageInput/TerminalMenu.svelte';
-	import Component from '../icons/Component.svelte';
 	import PlusAlt from '../icons/PlusAlt.svelte';
 	import Dropdown from '../common/Dropdown.svelte';
 
@@ -126,8 +141,13 @@
 	import Expand from '../icons/Expand.svelte';
 	import QueuedMessageItem from './MessageInput/QueuedMessageItem.svelte';
 	import TaskList from './Messages/ResponseMessage/TaskList.svelte';
+	import { getChatContext } from '$lib/components/chat/context';
+
+	const { models, temporary, getCurrentDirectory } = getChatContext();
 
 	const i18n: any = getContext('i18n');
+	export let selectedTerminalId: Pick<Writable<string | null>, 'subscribe' | 'set'>;
+	export let terminalSkills: Writable<any[]>;
 
 	type AskUserPrompt = {
 		id?: string;
@@ -155,17 +175,27 @@
 	export let statusHandler: Function = () => {};
 	export let forkHandler: Function = () => {};
 	export let chatId = '';
+	export let inputId = 'chat-input';
+	export let messagesContainerId = 'messages-container';
+	export let onTemporaryChange: ((value: boolean) => void) | null = null;
+	export let terminalContext: TerminalContext | null = null;
+	export let terminalSelectionEnabled = true;
 	export let contextUsage = null;
 	export let contextCompactionEnabled = false;
 	export let embedded = false;
 	export let callActive = false;
+	export let callEnabled = true;
 
 	export let autoScroll = false;
 	export let generating = false;
-	export let uploadPending = false;
 
 	export let atSelectedModel: Model | undefined = undefined;
-	export let selectedModels: [''];
+	export let selectedModels: string[];
+	export let multipleModels = true;
+	export let onModelSelect: (models: string[]) => void = () => {};
+	export let chatFiles: any[] = [];
+	export let params: Record<string, any> = {};
+	export let onParamChange: (key: string, value: unknown) => void = () => {};
 
 	let selectedModelIds = [];
 	$: selectedModelIds = atSelectedModel !== undefined ? [atSelectedModel.id] : selectedModels;
@@ -192,6 +222,24 @@
 			(history.currentId && history.messages[history.currentId]?.done != true) ||
 			generating);
 	$: canCompact = !!history?.currentId;
+	$: canSide =
+		($_user?.role === 'admin' ||
+			($_user?.role === 'user' && ($_user.permissions?.chat?.side_chat ?? false))) &&
+		!embedded &&
+		selectedModels.length === 1 &&
+		!!selectedModelIds[0] &&
+		!!chatId &&
+		!!history?.currentId;
+	$: canComments = !!(
+		!embedded &&
+		$config?.features?.enable_comments &&
+		$_user &&
+		isSavedChatId(chatId) &&
+		!$temporary
+	);
+	export const openComments = () => {
+		if (canComments) showTabs.set('comments');
+	};
 	$: hasChatContent = history?.currentId
 		? createMessagesList(history, history.currentId).some(
 				(message) =>
@@ -199,7 +247,7 @@
 			)
 		: false;
 	$: canToggleTemporary =
-		!embedded &&
+		(!embedded || onTemporaryChange !== null) &&
 		!chatId &&
 		($_user?.role === 'admin' ||
 			($_user?.role === 'user' &&
@@ -214,6 +262,9 @@
 	export let selectedFilterIds: string[] = [];
 
 	export let imageGenerationEnabled = false;
+	export let selectedImageModelId = '';
+	export let videoGenerationEnabled = false;
+	export let selectedVideoModelId = '';
 	export let webSearchEnabled = false;
 	export let codeInterpreterEnabled = false;
 	// One message out of character (roleplay); Chat.svelte clears it after sending.
@@ -230,8 +281,48 @@
 	export let oauthRedirectHandler: Function = () => {};
 
 	let showTerminalMenu = false;
+	let terminalControlsInMenu = false;
 
-	export let messageQueue: { id: string; prompt: string; files: any[] }[] = [];
+	function fitControlLabels(controls: HTMLElement) {
+		let frame: number;
+		const scheduleMeasure = () => {
+			cancelAnimationFrame(frame);
+			frame = requestAnimationFrame(() => {
+				const labels = controls.querySelectorAll<HTMLElement>('[data-input-label]');
+				const directoryControl = controls.querySelector<HTMLElement>(
+					'[data-working-directory-control]'
+				);
+				// Measure all labels together so separate controls cannot compete for the same space.
+				for (const label of labels) label.style.display = '';
+				if (directoryControl) directoryControl.style.display = '';
+				terminalControlsInMenu = controls.scrollWidth > controls.clientWidth;
+				if (terminalControlsInMenu) {
+					for (const label of labels) label.style.display = 'none';
+					if (directoryControl) directoryControl.style.display = 'none';
+				}
+			});
+		};
+		const observer = new ResizeObserver(scheduleMeasure);
+		const observeControls = () => {
+			observer.disconnect();
+			observer.observe(controls);
+			for (const child of controls.children) observer.observe(child);
+			scheduleMeasure();
+		};
+		const mutations = new MutationObserver(observeControls);
+		mutations.observe(controls, { childList: true, subtree: true, characterData: true });
+		observeControls();
+
+		return {
+			destroy() {
+				cancelAnimationFrame(frame);
+				observer.disconnect();
+				mutations.disconnect();
+			}
+		};
+	}
+
+	export let messageQueue: { id: string; prompt: string; files: any[]; error?: string }[] = [];
 	export let onQueueSendNow: (id: string) => void = () => {};
 	export let onQueueEdit: (id: string) => void = () => {};
 	export let onQueueDelete: (id: string) => void = () => {};
@@ -250,10 +341,12 @@
 	let copiedStatusChatId = false;
 	let selectedValvesType = 'tool'; // 'tool' or 'function'
 	let selectedValvesItemId = null;
-	let integrationsMenuCloseOnOutsideClick = true;
+	let showInputMenu = false;
+	let inputMenuTab = '';
+	let inputMenuCloseOnOutsideClick = true;
 
 	$: if (!showValvesModal) {
-		integrationsMenuCloseOnOutsideClick = true;
+		inputMenuCloseOnOutsideClick = true;
 	}
 
 	let chatInputDraft: any;
@@ -261,7 +354,7 @@
 	$: chatInputDraft = {
 		prompt,
 		files: files
-			.filter((file) => file.type !== 'image')
+			.filter((file) => file.type !== 'image' && !(file.file instanceof File))
 			.map((file) => {
 				return {
 					...file,
@@ -273,6 +366,9 @@
 		selectedSkillIds,
 		selectedFilterIds,
 		imageGenerationEnabled,
+		selectedImageModelId,
+		videoGenerationEnabled,
+		selectedVideoModelId,
 		webSearchEnabled,
 		codeInterpreterEnabled
 	};
@@ -301,15 +397,20 @@
 
 	const textVariableHandler = async (text: string) => {
 		if (text.includes('{{CLIPBOARD}}')) {
-			const clipboardText = await navigator.clipboard.readText().catch((err) => {
+			let clipboardText: string;
+			try {
+				clipboardText = await navigator.clipboard.readText();
+			} catch (error) {
 				toast.error($i18n.t('Failed to read clipboard contents'));
-				return '{{CLIPBOARD}}';
-			});
+				clipboardText = '{{CLIPBOARD}}';
+			}
 
-			const clipboardItems = await navigator.clipboard.read().catch((err) => {
-				console.error('Failed to read clipboard items:', err);
-				return [];
-			});
+			let clipboardItems: ClipboardItem[] = [];
+			try {
+				clipboardItems = await navigator.clipboard.read();
+			} catch (error) {
+				console.error('Failed to read clipboard items:', error);
+			}
 
 			for (const item of clipboardItems) {
 				for (const type of item.types) {
@@ -350,6 +451,14 @@
 
 			if (email) {
 				text = text.replaceAll('{{USER_EMAIL}}', email);
+			}
+		}
+
+		if (text.includes('{{USER_ROLE}}')) {
+			const role = sessionUser?.role || '';
+
+			if (role) {
+				text = text.replaceAll('{{USER_ROLE}}', role);
 			}
 		}
 
@@ -423,7 +532,7 @@
 	const replaceVariables = (variables: Record<string, any>) => {
 		console.log('Replacing variables:', variables);
 
-		const chatInput = document.getElementById('chat-input');
+		const chatInput = document.getElementById(inputId);
 
 		if (chatInput) {
 			chatInputElement.replaceVariables(variables);
@@ -467,18 +576,22 @@
 		}
 	};
 
-	export const setText = async (text?: string, cb?: (text: string) => void) => {
-		const chatInput = document.getElementById('chat-input');
+	export const setText = (text: string = '') => {
+		chatInputElement?.setText(text);
+		if (!$mobile && !$voiceCall) {
+			focus();
+		}
+	};
+
+	export const setTextHandler = async (text?: string, cb?: (text: string) => void) => {
+		const chatInput = document.getElementById(inputId);
 
 		if (chatInput) {
 			if (text !== '') {
 				text = await textVariableHandler(text || '');
 			}
 
-			chatInputElement?.setText(text);
-			if (!$showCallOverlay) {
-				focus();
-			}
+			setText(text);
 
 			if (text !== '') {
 				text = await inputVariableHandler(text);
@@ -504,39 +617,12 @@
 	const trimNumber = (value: number) =>
 		value >= 10 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '');
 
-	const estimateTokens = (value) => {
-		if (value === null || value === undefined || value === '') {
-			return 0;
-		}
-		if (typeof value !== 'string') {
-			try {
-				value = JSON.stringify(value);
-			} catch {
-				value = String(value);
-			}
-		}
-		return Math.max(1, Math.floor(value.length / 4));
-	};
-
-	const estimateMessagesTokens = (messages) =>
-		messages.reduce((total, message) => {
-			let next = total + 4 + estimateTokens(message.content);
-			next += estimateTokens(message.output);
-			next += estimateTokens(message.tool_calls);
-			if (message.files?.length) {
-				next += estimateTokens(
-					JSON.stringify(message.files).replace(/data:[\w/+.;=%-]*;base64,[A-Za-z0-9+/=]*/g, '')
-				);
-			}
-			return next;
-		}, 0);
-
-	const getLocalContextUsage = () => {
-		if (!history?.currentId) {
+	const getLocalContextUsage = (chatHistory: typeof history, system: string) => {
+		if (!chatHistory?.currentId) {
 			return null;
 		}
 
-		const messages = createMessagesList(history, history.currentId);
+		const messages = createMessagesList(chatHistory, chatHistory.currentId);
 		if (!messages.length) {
 			return null;
 		}
@@ -552,7 +638,7 @@
 		}
 
 		const activeMessages = messages.slice(startIdx);
-		let estimatedTokens = estimateTokens($settings?.system ?? '');
+		let estimatedTokens = estimateTokens(system);
 		let hasUsageCheckpoint = false;
 
 		for (let idx = activeMessages.length - 1; idx >= 0; idx -= 1) {
@@ -560,7 +646,10 @@
 			const usageTokens = getUsageTokenCount(usage);
 			if (usageTokens) {
 				hasUsageCheckpoint = true;
-				estimatedTokens = usageTokens + estimateMessagesTokens(activeMessages.slice(idx + 1));
+				estimatedTokens =
+					usageTokens +
+					estimateUsageGrowth(activeMessages[idx]) +
+					estimateMessagesTokens(activeMessages.slice(idx + 1));
 				break;
 			}
 		}
@@ -580,14 +669,14 @@
 
 	const copyStatusChatId = async () => {
 		if (!chatId) return;
-		await navigator.clipboard.writeText(chatId);
+		if (!(await copyToClipboard(chatId))) return;
 		copiedStatusChatId = true;
 		setTimeout(() => {
 			copiedStatusChatId = false;
 		}, 1600);
 	};
 
-	$: statusContextUsage = contextUsage ?? getLocalContextUsage();
+	$: statusContextUsage = contextUsage ?? getLocalContextUsage(history, $settings?.system ?? '');
 	$: contextHasThreshold = Number(statusContextUsage?.threshold) > 0;
 	$: contextPercent = contextHasThreshold
 		? Math.max(0, Math.round(statusContextUsage?.percent ?? 0))
@@ -603,7 +692,7 @@
 	$: contextBarPercent = contextHasThreshold ? Math.min(contextPercent, 100) : 0;
 
 	const getCommand = () => {
-		const chatInput = document.getElementById('chat-input');
+		const chatInput = document.getElementById(inputId);
 		let word = '';
 
 		if (chatInput) {
@@ -614,30 +703,14 @@
 	};
 
 	const replaceCommandWithText = (text) => {
-		const chatInput = document.getElementById('chat-input');
+		const chatInput = document.getElementById(inputId);
 		if (!chatInput) return;
 
 		chatInputElement?.replaceCommandWithText(text);
 	};
 
-	const temporaryHandler = async () => {
-		if (!canToggleTemporary) return;
-
-		if (($settings?.temporaryChatByDefault ?? false) && $temporaryChatEnabled) {
-			await temporaryChatEnabled.set(null);
-		} else {
-			await temporaryChatEnabled.set(!$temporaryChatEnabled);
-		}
-
-		if (location.pathname !== '/') {
-			await goto('/');
-		}
-
-		if ($temporaryChatEnabled) {
-			window.history.replaceState(window.history.state, '', '?temporary-chat=true');
-		} else {
-			window.history.replaceState(window.history.state, '', location.pathname);
-		}
+	const temporaryHandler = () => {
+		if (canToggleTemporary) onTemporaryChange?.(!$temporary);
 	};
 
 	const createSkillHandler = async () => {
@@ -647,7 +720,7 @@
 	};
 
 	const insertTextAtCursor = async (text: string) => {
-		const chatInput = document.getElementById('chat-input');
+		const chatInput = document.getElementById(inputId);
 		if (!chatInput) return;
 
 		text = await textVariableHandler(text);
@@ -662,7 +735,7 @@
 		text = await inputVariableHandler(text);
 		await tick();
 
-		const chatInputContainer = document.getElementById('chat-input-container');
+		const chatInputContainer = document.getElementById(`${inputId}-container`);
 		if (chatInputContainer) {
 			chatInputContainer.scrollTop = chatInputContainer.scrollHeight;
 		}
@@ -762,16 +835,8 @@
 		if (isComposing) {
 			return true;
 		}
+		// On Safari, ignore one keydown within 500 ms of compositionend so confirming IME text adds no newline.
 		// See https://www.stum.de/2016/06/24/handling-ime-events-in-javascript/.
-		// On Japanese input method editors (IMEs), the Enter key is used to confirm character
-		// selection. On Safari, when Enter is pressed, compositionend and keydown events are
-		// emitted. The keydown event triggers newline insertion, which we don't want.
-		// This method returns true if the keydown event should be ignored.
-		// We only ignore it once, as pressing Enter a second time *should* insert a newline.
-		// Furthermore, the keydown event timestamp must be close to the compositionEndedAt timestamp.
-		// This guards against the case where compositionend is triggered without the keyboard
-		// (e.g. character confirmation may be done with the mouse), and keydown is triggered
-		// afterwards- we wouldn't want to ignore the keydown event in this case.
 		if (isSafari && Math.abs(event.timeStamp - compositionEndedAt) < 500) {
 			compositionEndedAt = -2e8;
 			return true;
@@ -780,7 +845,7 @@
 	}
 
 	let chatInputContainerElement;
-	let chatInputElement;
+	let chatInputElement: RichTextInput;
 	let modelSelector;
 
 	let filesInputElement;
@@ -789,6 +854,45 @@
 	let inputFiles;
 
 	let showInputModal = false;
+	let showComparison = false;
+	let comparisonLoading = false;
+	let ComparisonModal: typeof import('../common/DiffEditorModal.svelte').default | null = null;
+	// Preserve the previous comparison description in the translation catalogs.
+	// $i18n.t('Uses the left working copy as your prompt.');
+	let comparisonTarget: {
+		chatId: string;
+		input: RichTextInput;
+		content: string;
+	} | null = null;
+
+	const openComparison = async () => {
+		if (comparisonLoading) return;
+		comparisonLoading = true;
+		const target = { chatId, input: chatInputElement };
+		try {
+			ComparisonModal = (await import('../common/DiffEditorModal.svelte')).default;
+			if (!target.input || target.chatId !== chatId || target.input !== chatInputElement) return;
+			comparisonTarget = { chatId, input: target.input, content: prompt };
+			showComparison = true;
+		} catch {
+			toast.error($i18n.t('Could not open comparison. Please try again.'));
+		} finally {
+			comparisonLoading = false;
+		}
+	};
+
+	const applyComparisonToPrompt = (text: string) => {
+		if (
+			!chatInputElement ||
+			comparisonTarget?.chatId !== chatId ||
+			comparisonTarget?.input !== chatInputElement ||
+			comparisonTarget?.content !== prompt
+		)
+			throw new Error($i18n.t('The prompt has changed. Reopen the comparison before applying.'));
+		// The editor's literal setter preserves mentions without expanding prompt variables.
+		if (text !== comparisonTarget.content) chatInputElement.setText(text);
+		void tick().then(() => focus());
+	};
 
 	export let dragged = false;
 	export let dropzoneId = 'chat-pane';
@@ -802,8 +906,10 @@
 		| 'file_upload'
 		| 'web_search'
 		| 'image_generation'
+		| 'video_generation'
 		| 'code_interpreter'
-		| 'terminal';
+		| 'terminal'
+		| 'builtin_tools';
 	type ModelCapabilitiesById = Record<string, Partial<Record<ModelCapability, boolean>>>;
 
 	let modelCapabilitiesById: ModelCapabilitiesById = {};
@@ -827,6 +933,12 @@
 		modelCapabilitiesById
 	);
 
+	let fileUploadEnabled: boolean = true;
+	$: fileUploadEnabled =
+		(getFilesystemUploadTerminal($selectedTerminalId, $terminalServers) ||
+			fileUploadCapableModels.length === selectedModelIds.length) &&
+		($_user?.role === 'admin' || $_user?.permissions?.chat?.file_upload);
+
 	let webSearchCapableModels = [];
 	$: webSearchCapableModels = getCapableModelIds(
 		selectedModelIds,
@@ -841,6 +953,13 @@
 		modelCapabilitiesById
 	);
 
+	let videoGenerationCapableModels = [];
+	$: videoGenerationCapableModels = getCapableModelIds(
+		selectedModelIds,
+		'video_generation',
+		modelCapabilitiesById
+	);
+
 	let codeInterpreterCapableModels = [];
 	$: codeInterpreterCapableModels = getCapableModelIds(
 		selectedModelIds,
@@ -848,29 +967,36 @@
 		modelCapabilitiesById
 	);
 
-	let terminalCapableModels = [];
-	$: terminalCapableModels = getCapableModelIds(
-		selectedModelIds,
-		'terminal',
-		modelCapabilitiesById
-	);
-	$: hasDirectToolServerAccess =
-		$_user?.role === 'admin' || ($_user?.permissions?.features?.direct_tool_servers ?? true);
+	// With no terminal yet, the menu still shows when the user may create one: it holds New terminal.
+	let canCreateTerminal = false;
+	$: if (
+		$config?.features?.enable_tool_servers &&
+		$terminalServers &&
+		!$terminalServers.some((t) => t.id)
+	)
+		templatesApi('/connections')
+			.then((rows) => (canCreateTerminal = rows.length > 0))
+			.catch(() => (canCreateTerminal = false));
 	$: showTerminalSelector =
 		$config?.features?.enable_tool_servers &&
-		terminalCapableModels.length > 0 &&
-		(($terminalServers ?? []).some((t) => t.id) ||
-			(hasDirectToolServerAccess &&
-				(($terminalServers ?? []).some((t) => !t.id) ||
-					($settings?.terminalServers ?? []).some((s) => s.url))));
+		(($terminalServers ?? []).some((t) => t.id) || canCreateTerminal);
+
+	let canCreateSkill: boolean = false;
+	$: canCreateSkill = selectedModelIds.every(
+		(id) =>
+			(modelCapabilitiesById[id]?.builtin_tools ?? true) &&
+			($models.find((model) => model.id === id)?.info?.meta?.builtinTools?.skills ?? true)
+	);
 
 	let toggleFilters = [];
 	$: toggleFilters = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels)
 		.map((id) => ($models.find((model) => model.id === id) || {})?.filters ?? [])
 		.reduce((acc, filters) => acc.filter((f1) => filters.some((f2) => f2.id === f1.id)));
 
+	$: showInputSelections = $settings?.showInputSelections ?? false;
+
 	let showToolsButton = false;
-	$: showToolsButton = ($tools ?? []).length > 0 || ($toolServers ?? []).length > 0;
+	$: showToolsButton = ($tools ?? []).length > 0;
 
 	let showSkillsButton = false;
 	$: showSkillsButton =
@@ -889,6 +1015,12 @@
 		$config?.features?.enable_image_generation &&
 		($_user.role === 'admin' || $_user?.permissions?.features?.image_generation);
 
+	let showVideoGenerationButton = false;
+	$: showVideoGenerationButton =
+		selectedModelIds.length === videoGenerationCapableModels.length &&
+		$config?.features?.enable_video_generation &&
+		($_user.role === 'admin' || $_user?.permissions?.features?.video_generation);
+
 	let showCodeInterpreterButton = false;
 	$: showCodeInterpreterButton =
 		!$selectedTerminalId &&
@@ -896,19 +1028,36 @@
 		$config?.features?.enable_code_interpreter &&
 		($_user.role === 'admin' || $_user?.permissions?.features?.code_interpreter);
 
+	let showCallButton = false;
+	$: showCallButton =
+		($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true)) &&
+		(callActive ||
+			$config?.audio?.realtime?.enabled ||
+			($config?.audio?.stt?.engine !== 'web' &&
+				($_user?.role === 'admin' || ($_user?.permissions?.chat?.stt ?? true))));
+
+	$: if (webSearchCapableModels.length < selectedModelIds.length) webSearchEnabled = false;
+	$: if (imageGenerationCapableModels.length < selectedModelIds.length)
+		imageGenerationEnabled = false;
+	$: if (videoGenerationCapableModels.length < selectedModelIds.length)
+		videoGenerationEnabled = false;
+	$: if (codeInterpreterCapableModels.length < selectedModelIds.length)
+		codeInterpreterEnabled = false;
+	$: {
+		const filterIds = selectedFilterIds.filter((id) =>
+			toggleFilters.some((filter: { id: string }) => filter.id === id)
+		);
+		if (filterIds.length !== selectedFilterIds.length) selectedFilterIds = filterIds;
+	}
+
 	// Disable code interpreter when terminal is active (mutually exclusive)
 	$: if ($selectedTerminalId && codeInterpreterEnabled) {
 		codeInterpreterEnabled = false;
 	}
 
-	// Clear selected terminal when model doesn't support terminal
-	$: if ($selectedTerminalId && selectedModelIds.length > 0 && terminalCapableModels.length === 0) {
-		selectedTerminalId.set(null);
-	}
-
 	const scrollToBottom = () => {
-		const element = document.getElementById('messages-container');
-		element.scrollTo({
+		const element = document.getElementById(messagesContainerId);
+		element?.scrollTo({
 			top: element.scrollHeight,
 			behavior: 'smooth'
 		});
@@ -921,19 +1070,19 @@
 				video: { cursor: 'never' },
 				audio: false
 			});
-			// Once the user selects a screen, temporarily create a video element
+			// Borrow a video element for the selected screen; this is a one-frame production.
 			const video = document.createElement('video');
 			video.srcObject = mediaStream;
 			// Ensure the video loads without affecting user experience or tab switching
 			await video.play();
-			// Set up the canvas to match the video dimensions
+			// Match the canvas to the video; no surprise cropping in this photo booth.
 			const canvas = document.createElement('canvas');
 			canvas.width = video.videoWidth;
 			canvas.height = video.videoHeight;
-			// Grab a single frame from the video stream using the canvas
+			// One frame, please. We are taking a screenshot, not directing a film.
 			const context = canvas.getContext('2d');
 			context.drawImage(video, 0, 0, canvas.width, canvas.height);
-			// Stop all video tracks (stop screen sharing) after capturing the image
+			// Screenshot captured. Stop the tracks before this becomes a live broadcast.
 			mediaStream.getTracks().forEach((track) => track.stop());
 
 			// bring back focus to this current tab, so that the user can see the screen capture
@@ -944,7 +1093,7 @@
 			const blob = await (await fetch(imageUrl)).blob();
 			const file = new File([blob], `screen-capture-${Date.now()}.png`, { type: 'image/png' });
 			inputFilesHandler([file]);
-			// Clean memory: Clear video srcObject
+			// Release the video stream reference; the photo booth is closed.
 			video.srcObject = null;
 		} catch (error) {
 			// Handle any errors (e.g., user cancels screen sharing)
@@ -954,21 +1103,77 @@
 
 	const getFilesystemUploadTerminal = (
 		selectedId = $selectedTerminalId,
-		servers: any[] | null = $terminalServers,
-		settingsValue: any = $settings
+		servers: any[] | null = $terminalServers
 	) => {
 		if (!selectedId) return null;
-
-		const systemTerminal = (servers ?? []).find(
-			(t: any) => t.id && t.id === selectedId && t.config?.chat_uploads === 'filesystem'
-		);
-		if (systemTerminal) return systemTerminal;
-
 		return (
-			(settingsValue?.terminalServers ?? []).find(
-				(t: any) => t.url === selectedId && t.enabled && t.config?.chat_uploads === 'filesystem'
+			(servers ?? []).find(
+				(t: any) => t.id && t.id === selectedId && t.config?.chat_uploads === 'filesystem'
 			) ?? null
 		);
+	};
+
+	const uploadTerminalFile = async (fileItem, sessionId: string | null) => {
+		fileItem.status = 'uploading';
+		fileItem.error = '';
+		files = files;
+		try {
+			const server = getFilesystemUploadTerminal(fileItem.terminal_id);
+			const terminal = server
+				? resolveTerminalTarget(fileItem.terminal_id, $terminalServers ?? [], localStorage.token, {
+						chatId: sessionId,
+						modelId: selectedModels[0] ?? null
+					})
+				: null;
+			if (!terminal) throw new Error('The attached file’s terminal is unavailable.');
+			if (fileItem.session_id && fileItem.session_id !== sessionId)
+				throw new Error('Attached files must belong to this chat.');
+			if (server.scope === 'chat' && !isSavedChatId(sessionId))
+				throw new Error('A saved chat is required for this terminal');
+
+			const cwd =
+				getCurrentDirectory?.(fileItem.terminal_id) ||
+				(terminalContext?.terminalId === fileItem.terminal_id
+					? terminalContext?.currentDirectory
+					: null) ||
+				(await getCwd(terminal))?.cwd;
+			if (!cwd) throw new Error($i18n.t('Could not determine the upload folder.'));
+			const uploadedFile = await uploadNewFileToTerminal(terminal, cwd, fileItem.file);
+			if (!uploadedFile) throw new Error($i18n.t('Failed to upload file.'));
+
+			fileItem.status = 'uploaded';
+			fileItem.session_id = sessionId;
+			fileItem.name = uploadedFile.path.split('/').pop() || fileItem.name;
+			fileItem.id = uploadedFile.path;
+			fileItem.path = uploadedFile.path;
+			fileItem.url = uploadedFile.path;
+			fileItem.size = uploadedFile.size ?? fileItem.size;
+			fileItem.file = uploadedFile;
+			showFileNavDir.set(uploadedFile.path);
+		} catch (error) {
+			fileItem.status = 'error';
+			fileItem.error = `${error}`;
+			toast.error(fileItem.error);
+			return false;
+		} finally {
+			files = files;
+		}
+		return true;
+	};
+
+	export const uploadPendingFiles = async (sessionId: string) => {
+		if (!sessionId) return false;
+		for (const fileItem of files.filter(
+			(item) => item.status === 'pending' && item.file instanceof File
+		)) {
+			if (chatId !== sessionId) return false;
+			if (!(await uploadTerminalFile(fileItem, sessionId))) {
+				fileItem.status = 'pending';
+				files = files;
+				return false;
+			}
+		}
+		return !files.some((item) => item.status === 'pending' && item.file instanceof File);
 	};
 
 	const uploadFileHandler = async (file, process = true, itemData = {}) => {
@@ -1010,52 +1215,24 @@
 		files = [...files, fileItem];
 
 		if (filesystemUploadTerminal) {
-			try {
-				const cwd =
-					(
-						await getCwd(
-							filesystemUploadTerminal.url,
-							filesystemUploadTerminal.key,
-							chatId || undefined
-						)
-					)?.cwd || '/';
-				const uploadedFile = await uploadNewFileToTerminal(
-					filesystemUploadTerminal.url,
-					filesystemUploadTerminal.key,
-					cwd,
-					file,
-					chatId || undefined
-				);
-
-				if (uploadedFile) {
-					fileItem.type = 'filesystem';
-					fileItem.status = 'uploaded';
-					fileItem.name = uploadedFile.path.split('/').pop() || file.name;
-					fileItem.id = uploadedFile.path;
-					fileItem.path = uploadedFile.path;
-					fileItem.url = uploadedFile.path;
-					fileItem.size = uploadedFile.size ?? file.size;
-					fileItem.file = uploadedFile;
-					files = files;
-					showFileNavDir.set(uploadedFile.path);
-				} else {
-					fileItem.status = 'error';
-					fileItem.error = $i18n.t('Failed to upload file.');
-					toast.error(fileItem.error);
-					files = files.filter((item) => item?.itemId !== tempItemId);
-				}
-			} catch (e) {
-				fileItem.status = 'error';
-				fileItem.error = `${e}`;
-				toast.error(`${e}`);
-				files = files.filter((item) => item?.itemId !== tempItemId);
-			} finally {
-				onUpdate({ file: fileItem });
+			fileItem.type = 'filesystem';
+			fileItem.file = file;
+			fileItem.terminal_id = $selectedTerminalId;
+			fileItem.session_id = chatId || null;
+			if (!chatId && filesystemUploadTerminal.scope === 'chat') {
+				fileItem.status = 'pending';
+				files = files;
+				return;
 			}
+
+			if (!(await uploadTerminalFile(fileItem, fileItem.session_id))) {
+				files = files.filter((item) => item?.itemId !== tempItemId);
+			}
+			onUpdate({ file: fileItem });
 			return;
 		}
 
-		if (!$temporaryChatEnabled) {
+		if (!$temporary) {
 			try {
 				// If the file is an audio file, provide the language for STT.
 				let metadata = null;
@@ -1179,6 +1356,7 @@
 				return;
 			}
 
+			file = await normalizeImageFile(file);
 			if (isRasterImageContentType(file['type']) || isHeicImage(file)) {
 				if (visionCapableModels.length === 0) {
 					toast.error($i18n.t('Selected model(s) do not support image inputs'));
@@ -1230,7 +1408,7 @@
 					// Compress the image if settings or config require it
 					imageUrl = await compressImageHandler(imageUrl, $settings, $config);
 
-					if ($temporaryChatEnabled) {
+					if ($temporary) {
 						files = [
 							...files,
 							{
@@ -1266,13 +1444,27 @@
 		);
 
 		if (res) {
-			// Clear the input content saved in session storage.
+			// The draft has become a note; session storage can stop keeping a spare.
 			sessionStorage.removeItem('chat-input');
 			goto(`/notes/${res.id}`);
 		}
 	};
 
+	const isAttachmentDrop = (event: DragEvent) => {
+		if (!(event.target instanceof Element)) return false;
+		// Areas with their own file drop, like a folder's Knowledge list, keep what lands on them.
+		if (event.target.closest('[data-file-drop-target]')) return false;
+		const composer = event.target.closest('[data-composer-id]');
+		if (composer) return composer.getAttribute('data-composer-id') === inputId;
+		// Files can land anywhere in this chat's dropzone. Sidebar items still target
+		// the composer so dragging a chat into a split panel keeps working.
+		return event.dataTransfer?.types.includes('Files') ?? false;
+	};
 	const onDragOver = (e: DragEvent) => {
+		if (!isAttachmentDrop(e)) {
+			dragged = false;
+			return;
+		}
 		e.preventDefault();
 
 		// Check if a file or a sidebar chat/folder item is being dragged.
@@ -1280,9 +1472,12 @@
 		// (e.g. Notes, Workspace, pinned Models), which also set 'text/plain'.
 		if (
 			e.dataTransfer?.types?.includes('Files') ||
+			e.dataTransfer?.types?.includes('application/x-terminal-file') ||
 			e.dataTransfer?.types?.includes('application/x-open-webui-drag')
 		) {
 			dragged = true;
+			if (e.dataTransfer?.types.includes('application/x-terminal-file'))
+				e.dataTransfer.dropEffect = 'copy';
 		} else {
 			dragged = false;
 		}
@@ -1296,8 +1491,64 @@
 	};
 
 	const onDrop = async (e: DragEvent) => {
+		if (!isAttachmentDrop(e)) return;
 		e.preventDefault();
-		console.log(e);
+		const terminalFiles = e.dataTransfer?.getData('application/x-terminal-file');
+		if (terminalFiles) {
+			e.stopPropagation();
+			dragged = false;
+			try {
+				if ($_user?.role !== 'admin' && !($_user?.permissions?.chat?.file_upload ?? true))
+					throw new Error($i18n.t('You do not have permission to upload files.'));
+				const entries = JSON.parse(terminalFiles);
+				if (
+					!Array.isArray(entries) ||
+					entries.some(
+						(entry) =>
+							!entry ||
+							typeof entry.path !== 'string' ||
+							!entry.path ||
+							typeof entry.name !== 'string' ||
+							typeof entry.terminal_id !== 'string' ||
+							!entry.terminal_id ||
+							(entry.session_id !== null && typeof entry.session_id !== 'string')
+					)
+				)
+					throw new Error($i18n.t('Invalid file attachment.'));
+				const attachments = entries.map((entry) =>
+					filesystemFile(entry, entry.terminal_id, entry.session_id)
+				);
+				const existing = files.filter((file) => file.type === 'filesystem');
+				const terminalId = existing[0]?.terminal_id ?? attachments[0]?.terminal_id;
+				if (
+					attachments.some(
+						(file) =>
+							file.terminal_id !== terminalId || (file.session_id && file.session_id !== chatId)
+					)
+				)
+					throw new Error(
+						$i18n.t('Attached files must belong to this chat and the same terminal.')
+					);
+				const additions = attachments.filter(
+					(file, index) =>
+						!existing.some((item) => (item.path ?? item.url ?? item.id) === file.path) &&
+						attachments.findIndex((item) => item.path === file.path) === index
+				);
+				if (
+					$config?.file?.max_count != null &&
+					files.length + additions.length > $config.file.max_count
+				)
+					throw new Error(
+						$i18n.t('You can only chat with a maximum of {{maxCount}} file(s) at a time.', {
+							maxCount: $config.file.max_count
+						})
+					);
+				files = [...files, ...additions];
+			} catch (error) {
+				toast.error(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
 
 		// Check if the dropped data is a sidebar chat, folder, note, or model item
 		const textData = e.dataTransfer?.getData('text/plain');
@@ -1305,7 +1556,7 @@
 			try {
 				const data = JSON.parse(textData);
 				if (data.type === 'chat' && data.id) {
-					// Fetch the chat to get its title, then add as a reference chat
+					// Fetch the chat title so the attachment arrives with a name tag.
 					const chat = await getChatById(localStorage.token, data.id);
 					if (chat) {
 						const chatItem = {
@@ -1323,7 +1574,7 @@
 					e.stopPropagation();
 					return;
 				} else if (data.type === 'folder' && data.id) {
-					// Fetch the folder to get its name, then add as a reference folder
+					// Fetch the folder name; an ID alone makes a poor introduction.
 					const folder = await getFolderById(localStorage.token, data.id);
 					if (folder) {
 						const folderItem = {
@@ -1340,7 +1591,7 @@
 					e.stopPropagation();
 					return;
 				} else if (data.type === 'note' && data.id) {
-					// Fetch the note to get its title, then add as a reference note
+					// Fetch the note title before introducing it to the conversation.
 					const note = await getNoteById(localStorage.token, data.id);
 					if (note) {
 						const noteItem = {
@@ -1389,15 +1640,28 @@
 
 		if (
 			$settings?.keyboardShortcuts !== false &&
+			(recording ||
+				(document.activeElement?.closest('[data-composer-id]')?.getAttribute('data-composer-id') ??
+					'chat-input') === inputId) &&
 			matchKeybinding(e) === Shortcut.TOGGLE_DICTATION
 		) {
 			e.preventDefault();
 			if (recording) {
 				// Confirm and stop recording
-				document.getElementById('confirm-recording-button')?.click();
+				document
+					.getElementById(
+						inputId === 'chat-input'
+							? 'confirm-recording-button'
+							: `${inputId}-confirm-recording-button`
+					)
+					?.click();
 			} else {
 				// Start recording (same logic as voice-input-button click)
-				document.getElementById('voice-input-button')?.click();
+				document
+					.getElementById(
+						inputId === 'chat-input' ? 'voice-input-button' : `${inputId}-voice-input-button`
+					)
+					?.click();
 			}
 			return;
 		}
@@ -1425,7 +1689,11 @@
 			{
 				char: '@',
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					modelId: () => selectedModels[0] ?? null,
 					i18n,
+					selectedTerminalId,
+					terminalSkills,
+					fileUploadEnabled: () => fileUploadEnabled,
 					onSelect: (e) => {
 						const { type, data } = e;
 
@@ -1462,6 +1730,7 @@
 							files = [
 								...files,
 								{
+									...data,
 									type: 'filesystem',
 									id: path,
 									path,
@@ -1493,7 +1762,10 @@
 							'compact',
 							'fork',
 							'status',
+							'comments',
+							'side',
 							'model',
+							'compare',
 							'settings',
 							'temporary',
 							'skills:create'
@@ -1516,22 +1788,36 @@
 						.run();
 				},
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					modelId: () => selectedModels[0] ?? null,
 					i18n,
+					selectedTerminalId,
+					terminalSkills,
 					canCompact: () => !!history?.currentId && contextCompactionEnabled,
 					compactDisabled: () => isActive,
 					canStatus: () => !!history?.currentId,
+					canComments: () => canComments,
+					canSide: () => canSide,
 					canFork: () =>
 						!!history?.currentId &&
+						!$temporary &&
 						($_user?.role === 'admin' || ($_user?.permissions?.chat?.import ?? true)),
 					forkDisabled: () => isActive,
 					canTemporary: () => canToggleTemporary,
 					hasChatContent: hasChatContent,
-					temporaryEnabled: () => $temporaryChatEnabled === true,
+					canCreateSkill: () => canCreateSkill,
+					temporaryEnabled: () => $temporary === true,
 					contextUsage: () => statusContextUsage,
 					onCompact: compactHandler,
 					onStatus: statusHandler,
+					onComments: openComments,
+					onSide: () => {
+						if (!canSide) return;
+						chatTabRequest.set({ parentChatId: chatId, prompt: '' });
+						showTabs.set('chat');
+					},
 					onFork: forkHandler,
 					onModel: () => modelSelector?.open(),
+					onCompare: openComparison,
 					onSettings: () => showSettings.set(true),
 					onTemporary: temporaryHandler,
 					onCreateSkill: createSkillHandler,
@@ -1572,7 +1858,11 @@
 			{
 				char: '#',
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					modelId: () => selectedModels[0] ?? null,
 					i18n,
+					selectedTerminalId,
+					terminalSkills,
+					fileUploadEnabled: () => fileUploadEnabled,
 					onSelect: (e) => {
 						const { type, data } = e;
 
@@ -1610,7 +1900,10 @@
 			{
 				char: '$',
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					modelId: () => selectedModels[0] ?? null,
 					i18n,
+					selectedTerminalId,
+					terminalSkills,
 					onSelect: (e) => {
 						focus({ preventScroll: true });
 					},
@@ -1632,7 +1925,10 @@
 					editor.chain().focus().deleteRange(range).insertContent(emoji).run();
 				},
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					modelId: () => selectedModels[0] ?? null,
 					i18n,
+					selectedTerminalId,
+					terminalSkills,
 					onSelect: (e) => {
 						focus({ preventScroll: true });
 					},
@@ -1645,8 +1941,8 @@
 		loaded = true;
 
 		window.setTimeout(() => {
-			if (!$showCallOverlay) {
-				const chatInput = document.getElementById('chat-input');
+			if (!$mobile && !$voiceCall) {
+				const chatInput = document.getElementById(inputId);
 				chatInput?.focus();
 			}
 		}, 0);
@@ -1690,13 +1986,28 @@
 	});
 </script>
 
+{#if showComparison && ComparisonModal}
+	<svelte:component
+		this={ComparisonModal}
+		bind:show={showComparison}
+		title={$i18n.t('Compare text')}
+		initialContent={comparisonTarget?.content ?? ''}
+		applyLabel={$i18n.t('Use in prompt')}
+		applyDescription={$i18n.t('Uses the proposed revision as your prompt.')}
+		discardMessage={$i18n.t(
+			'Your comparison changes will be discarded. Your prompt will stay unchanged.'
+		)}
+		onApply={applyComparisonToPrompt}
+	/>
+{/if}
+
 <ToolServersModal
 	bind:show={showTools}
 	{selectedToolIds}
 	onConnect={(id) =>
 		oauthRedirectHandler({ id, serverId: id.split(':').at(-1), authType: 'mcp' }, chatInputDraft)}
 />
-<SkillsModal bind:show={showSkills} {selectedSkillIds} />
+<SkillsModal bind:show={showSkills} {selectedSkillIds} {terminalSkills} />
 
 <InputVariablesModal
 	bind:show={showInputVariablesModal}
@@ -1713,7 +2024,7 @@
 		await tick();
 	}}
 	on:close={() => {
-		integrationsMenuCloseOnOutsideClick = true;
+		inputMenuCloseOnOutsideClick = true;
 	}}
 />
 
@@ -1814,6 +2125,9 @@
 
 					<div class={recording ? '' : 'hidden'}>
 						<VoiceRecording
+							confirmButtonId={inputId === 'chat-input'
+								? 'confirm-recording-button'
+								: `${inputId}-confirm-recording-button`}
 							bind:recording
 							onCancel={async () => {
 								recording = false;
@@ -1844,10 +2158,12 @@
 						}}
 					>
 						<button
-							id="generate-message-pair-button"
+							id={inputId === 'chat-input'
+								? 'generate-message-pair-button'
+								: `${inputId}-generate-message-pair-button`}
 							type="button"
 							aria-label={$i18n.t('Generate message pair')}
-							class="hidden"
+							class="hidden generate-message-pair-button"
 							on:click={() => createMessagePair(prompt)}
 						/>
 
@@ -1887,6 +2203,7 @@
 									<QueuedMessageItem
 										id={queuedMessage.id}
 										content={queuedMessage.prompt}
+										error={queuedMessage.error ?? ''}
 										files={queuedMessage.files}
 										onSendNow={onQueueSendNow}
 										onEdit={onQueueEdit}
@@ -1975,13 +2292,14 @@
 						{/if}
 
 						<div
-							id="message-input-container"
-							class="flex-1 flex flex-col relative w-full shadow-lg rounded-3xl border {$temporaryChatEnabled
-								? 'border-dashed border-gray-100 dark:border-gray-800 hover:border-gray-200 focus-within:border-gray-200 hover:dark:border-gray-700 focus-within:dark:border-gray-700'
-								: ' border-gray-100/50 dark:border-gray-850/50 hover:border-gray-200 focus-within:border-gray-100 hover:dark:border-gray-800 focus-within:dark:border-gray-800'} {($settings?.highContrastMode ??
+							id={inputId === 'chat-input' ? 'message-input-container' : `${inputId}-wrapper`}
+							data-composer-id={inputId}
+							class="flex-1 flex flex-col relative w-full shadow-[0_6px_24px_-4px_rgba(0,0,0,0.1)] rounded-3xl border {$temporary
+								? 'border-dashed border-gray-300/70 dark:border-gray-700/70'
+								: ' border-gray-200/60 dark:border-gray-800/40'} {($settings?.highContrastMode ??
 							false)
 								? 'focus-within:outline focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-blue-500 [&_.ProseMirror:focus-visible]:outline-none!'
-								: ''}  transition px-0.5 bg-white/5 dark:bg-gray-500/5 backdrop-blur-sm dark:text-gray-100"
+								: ''}  transition px-0.5 bg-white/80 dark:bg-[oklch(0.24_0_0)]/90 backdrop-blur-md dark:text-gray-100"
 							dir={$settings?.chatDirection ?? 'auto'}
 						>
 							{#if atSelectedModel !== undefined}
@@ -2000,6 +2318,7 @@
 										<div>
 											<button
 												class="flex items-center dark:text-gray-500"
+												aria-label={$i18n.t('Remove Selected Model')}
 												on:click={() => {
 													atSelectedModel = undefined;
 												}}
@@ -2127,7 +2446,7 @@
 											? 'pt-1'
 											: 'pt-2'
 										: ''}"
-									id="chat-input-container"
+									id={`${inputId}-container`}
 									on:input={handleTypingInput}
 								>
 									{#if suggestions}
@@ -2135,7 +2454,7 @@
 											{#key $settings?.showFormattingToolbar ?? false}
 												<RichTextInput
 													bind:this={chatInputElement}
-													id="chat-input"
+													id={inputId}
 													editable={!showInputModal}
 													onChange={(content) => {
 														prompt = content.md;
@@ -2175,7 +2494,8 @@
 															text,
 															history?.currentId
 																? createMessagesList(history, history.currentId)
-																: null
+																: null,
+															'general'
 														).catch((error) => {
 															console.log(error);
 
@@ -2206,13 +2526,17 @@
 															e.preventDefault();
 
 															const userMessageElement = [
-																...document.getElementsByClassName('user-message')
+																...(document
+																	.getElementById(messagesContainerId)
+																	?.getElementsByClassName('user-message') ?? [])
 															]?.at(-1);
 
 															if (userMessageElement) {
 																userMessageElement.scrollIntoView({ block: 'center' });
 																const editButton = [
-																	...document.getElementsByClassName('edit-user-message-button')
+																	...userMessageElement.getElementsByClassName(
+																		'edit-user-message-button'
+																	)
 																]?.at(-1);
 
 																editButton?.click();
@@ -2252,7 +2576,10 @@
 															}
 														}
 
-														if (e.key === 'Escape') {
+														if (
+															$settings?.keyboardShortcuts !== false &&
+															matchKeybinding(e) === Shortcut.CLEAR_INPUT_SELECTIONS
+														) {
 															console.log('Escape');
 															atSelectedModel = undefined;
 															selectedToolIds = [];
@@ -2260,6 +2587,7 @@
 
 															webSearchEnabled = false;
 															imageGenerationEnabled = false;
+															videoGenerationEnabled = false;
 															codeInterpreterEnabled = false;
 														}
 													}}
@@ -2309,15 +2637,19 @@
 							<div class=" flex justify-between mt-0.5 mb-2 mx-0.5 max-w-full" dir="ltr">
 								<div class="ml-1 self-end flex items-center">
 									<InputMenu
+										bind:show={showInputMenu}
+										bind:tab={inputMenuTab}
+										closeOnOutsideClick={inputMenuCloseOnOutsideClick}
+										{chatId}
 										bind:files
 										selectedModels={selectedModelIds}
 										fileUploadCapableModels={getFilesystemUploadTerminal(
 											$selectedTerminalId,
-											$terminalServers,
-											$settings
+											$terminalServers
 										)
 											? selectedModelIds
 											: fileUploadCapableModels}
+										{visionCapableModels}
 										{toolApprovalMode}
 										{onToolApprovalModeChange}
 										{screenCaptureHandler}
@@ -2364,70 +2696,83 @@
 										onClose={async () => {
 											await tick();
 
-											const chatInput = document.getElementById('chat-input');
-											chatInput?.focus();
+											if (!$mobile) {
+												const chatInput = document.getElementById(inputId);
+												chatInput?.focus();
+											}
 										}}
 									>
 										<button
 											type="button"
 											id="input-menu-button"
-											class="bg-transparent hover:bg-gray-100 text-gray-700 dark:text-white dark:hover:bg-gray-800 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden shrink-0"
+											class="bg-transparent hover:bg-gray-100/40 text-gray-700 dark:text-white dark:hover:bg-gray-800/40 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden shrink-0"
 											aria-label={$i18n.t('More')}
 										>
 											<PlusAlt className="size-5" />
 										</button>
+
+										<svelte:fragment slot="terminal">
+											{#if showTerminalSelector && terminalControlsInMenu}
+												<TerminalMenu
+													{selectedTerminalId}
+													modelId={selectedModels[0] ?? null}
+													inMenu
+													bind:tab={inputMenuTab}
+													{chatId}
+													bind:terminalContext
+													disabled={isActive || !terminalSelectionEnabled}
+												/>
+												{#if inputMenuTab === ''}
+													<div class="h-px mx-1 my-1 bg-gray-100 dark:bg-gray-800"></div>
+												{/if}
+											{/if}
+										</svelte:fragment>
+
+										<!-- Retired menu label: keep its translation. {$i18n.t('Integrations')} -->
+										<svelte:fragment slot="integrations">
+											{#if showWebSearchButton || showImageGenerationButton || showVideoGenerationButton || showCodeInterpreterButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.length > 0)}
+												<IntegrationsMenu
+													{selectedTerminalId}
+													{terminalSkills}
+													bind:show={showInputMenu}
+													bind:tab={inputMenuTab}
+													selectedModels={selectedModelIds}
+													{toggleFilters}
+													{showWebSearchButton}
+													{showImageGenerationButton}
+													{showVideoGenerationButton}
+													{showCodeInterpreterButton}
+													bind:selectedToolIds
+													bind:selectedSkillIds
+													bind:selectedFilterIds
+													bind:webSearchEnabled
+													bind:imageGenerationEnabled
+													bind:selectedImageModelId
+													bind:videoGenerationEnabled
+													bind:selectedVideoModelId
+													bind:codeInterpreterEnabled
+													oauthRedirectHandler={(tool: {
+														id: string;
+														serverId: string;
+														authType?: string | null;
+													}) => oauthRedirectHandler(tool, chatInputDraft)}
+													{onWebSearchToggle}
+													onShowValves={(e) => {
+														const { type, id } = e;
+														selectedValvesType = type;
+														selectedValvesItemId = id;
+														showValvesModal = true;
+														inputMenuCloseOnOutsideClick = false;
+													}}
+												/>
+											{/if}
+										</svelte:fragment>
 									</InputMenu>
 
-									{#if showWebSearchButton || showImageGenerationButton || showCodeInterpreterButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.length > 0)}
-										<div
-											class="flex self-center w-[0.0625rem] h-4 mx-1 bg-gray-200/50 dark:bg-gray-800/50 shrink-0"
-										/>
-
-										<IntegrationsMenu
-											selectedModels={selectedModelIds}
-											{toggleFilters}
-											{showWebSearchButton}
-											{showImageGenerationButton}
-											{showCodeInterpreterButton}
-											bind:selectedToolIds
-											bind:selectedSkillIds
-											bind:selectedFilterIds
-											bind:webSearchEnabled
-											bind:imageGenerationEnabled
-											bind:codeInterpreterEnabled
-											oauthRedirectHandler={(tool: {
-												id: string;
-												serverId: string;
-												authType?: string | null;
-											}) => oauthRedirectHandler(tool, chatInputDraft)}
-											{onWebSearchToggle}
-											closeOnOutsideClick={integrationsMenuCloseOnOutsideClick}
-											onShowValves={(e) => {
-												const { type, id } = e;
-												selectedValvesType = type;
-												selectedValvesItemId = id;
-												showValvesModal = true;
-												integrationsMenuCloseOnOutsideClick = false;
-											}}
-											onClose={async () => {
-												await tick();
-
-												if (!$mobile) {
-													const chatInput = document.getElementById('chat-input');
-													chatInput?.focus();
-												}
-											}}
-										>
-											<button
-												type="button"
-												id="integration-menu-button"
-												class="bg-transparent hover:bg-gray-100 text-gray-700 dark:text-white dark:hover:bg-gray-800 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden shrink-0"
-												aria-label={$i18n.t('Integrations')}
-											>
-												<Component className="size-4.5" strokeWidth="1.5" />
-											</button>
-										</IntegrationsMenu>
-									{/if}
+									<div
+										aria-hidden="true"
+										class="flex self-center w-[0.0625rem] h-4 mx-1 bg-gray-200/50 dark:bg-gray-800/50 shrink-0"
+									></div>
 
 									{#if hasChatVariables}
 										<Tooltip content={$i18n.t('Chat Variables')} placement="top">
@@ -2446,13 +2791,17 @@
 									{/if}
 								</div>
 
-								<div class="flex flex-1 items-center min-w-0 overflow-x-auto scrollbar-none">
-									{#if selectedModelIds.length === 1 && $models.find((m) => m.id === selectedModelIds[0])?.has_user_valves}
+								<div
+									use:fitControlLabels
+									class="flex flex-1 items-center min-w-0 overflow-x-auto scrollbar-none"
+								>
+									{#if selectedModelIds.length === 1 && $models.find((m) => m.id === selectedModelIds[0])?.has_user_valves && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.valves ?? true))}
 										<div class="ml-1 flex gap-1.5 shrink-0">
 											<Tooltip content={$i18n.t('Valves')} placement="top">
 												<button
 													type="button"
 													id="model-valves-button"
+													aria-label={$i18n.t('Valves')}
 													class="bg-transparent hover:bg-gray-100 text-gray-700 dark:text-white dark:hover:bg-gray-800 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden"
 													on:click={() => {
 														selectedValvesType = 'function';
@@ -2467,7 +2816,7 @@
 									{/if}
 
 									<div class="ml-1 flex gap-1.5 shrink-0">
-										{#if (selectedToolIds ?? []).length > 0}
+										{#if showInputSelections && (selectedToolIds ?? []).length > 0 && $visibleControls['chat.selected_tools']}
 											<Tooltip
 												content={$i18n.t('{{COUNT}} Available Tools', {
 													COUNT: (selectedToolIds ?? []).length
@@ -2483,14 +2832,14 @@
 												>
 													<Wrench className="size-4" strokeWidth="1.75" />
 
-													<span class="text-sm">
+													<span data-input-label class="text-sm">
 														{(selectedToolIds ?? []).length}
 													</span>
 												</button>
 											</Tooltip>
 										{/if}
 
-										{#if (selectedSkillIds ?? []).length > 0}
+										{#if showInputSelections && (selectedSkillIds ?? []).length > 0 && $visibleControls['chat.selected_skills']}
 											<Tooltip
 												content={$i18n.t('{{COUNT}} Available Skills', {
 													COUNT: (selectedSkillIds ?? []).length
@@ -2506,7 +2855,7 @@
 												>
 													<Cube className="size-4" strokeWidth="1.75" />
 
-													<span class="text-sm">
+													<span data-input-label class="text-sm">
 														{(selectedSkillIds ?? []).length}
 													</span>
 												</button>
@@ -2515,7 +2864,7 @@
 
 										{#each selectedFilterIds as filterId (filterId)}
 											{@const filter = toggleFilters.find((f) => f.id === filterId)}
-											{#if filter}
+											{#if showInputSelections && filter && $visibleControls['chat.selected_filters']}
 												<Tooltip
 													content={resolveLocalizedFunction(
 														filter,
@@ -2584,9 +2933,11 @@
 											{/if}
 										{/each}
 
-										{#if webSearchEnabled && showWebSearchButton}
+										{#if showInputSelections && webSearchEnabled && showWebSearchButton && $visibleControls['chat.selected_web_search']}
 											<Tooltip content={$i18n.t('Web Search')} placement="top">
 												<button
+													aria-label={$i18n.t('Web Search')}
+													aria-pressed={webSearchEnabled}
 													on:click|preventDefault={() => (webSearchEnabled = !webSearchEnabled)}
 													type="button"
 													class="group p-[0.375rem] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {webSearchEnabled ||
@@ -2595,16 +2946,19 @@
 														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '}"
 												>
 													<GlobeAlt className="size-4" strokeWidth="1.75" />
-													<div class="hidden group-hover:block">
-														<XMark className="size-4" strokeWidth="1.75" />
-													</div>
 												</button>
 											</Tooltip>
 										{/if}
 
-										{#if imageGenerationEnabled && showImageGenerationButton}
-											<Tooltip content={$i18n.t('Image')} placement="top">
+										{#if showInputSelections && imageGenerationEnabled && showImageGenerationButton && $visibleControls['chat.selected_image_generation']}
+											<Tooltip
+												content={$imageModels?.find((model) => model.id === selectedImageModelId)
+													?.name ?? $i18n.t('Image')}
+												placement="top"
+											>
 												<button
+													aria-label={$i18n.t('Image')}
+													aria-pressed={imageGenerationEnabled}
 													on:click|preventDefault={() =>
 														(imageGenerationEnabled = !imageGenerationEnabled)}
 													type="button"
@@ -2613,9 +2967,27 @@
 														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '}"
 												>
 													<Photo className="size-4" strokeWidth="1.75" />
-													<div class="hidden group-hover:block">
-														<XMark className="size-4" strokeWidth="1.75" />
-													</div>
+												</button>
+											</Tooltip>
+										{/if}
+
+										{#if showInputSelections && videoGenerationEnabled && showVideoGenerationButton && $visibleControls['chat.selected_video_generation']}
+											<Tooltip
+												content={$videoModels?.find((model) => model.id === selectedVideoModelId)
+													?.name ?? $i18n.t('Video')}
+												placement="top"
+											>
+												<button
+													aria-label={$i18n.t('Video')}
+													aria-pressed={videoGenerationEnabled}
+													on:click|preventDefault={() =>
+														(videoGenerationEnabled = !videoGenerationEnabled)}
+													type="button"
+													class="group p-[0.375rem] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {videoGenerationEnabled
+														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-700/10 border border-sky-200/40 dark:border-sky-500/20'
+														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '}"
+												>
+													<VideoCamera className="size-4" strokeWidth="1.75" />
 												</button>
 											</Tooltip>
 										{/if}
@@ -2661,7 +3033,7 @@
 											</Tooltip>
 										{/if}
 
-										{#if codeInterpreterEnabled && showCodeInterpreterButton}
+										{#if showInputSelections && codeInterpreterEnabled && showCodeInterpreterButton && $visibleControls['chat.selected_code_interpreter']}
 											<Tooltip content={$i18n.t('Code Interpreter')} placement="top">
 												<button
 													aria-label={codeInterpreterEnabled
@@ -2679,22 +3051,22 @@
 														: 'focus:outline-hidden rounded-full'}"
 												>
 													<Terminal className="size-3.5" strokeWidth="2" />
-
-													<div class="hidden group-hover:block">
-														<XMark className="size-4" strokeWidth="1.75" />
-													</div>
 												</button>
 											</Tooltip>
 										{/if}
 
-										<!-- Terminal Server Selector -->
+										<!-- Keep this instance mounted to measure the full labels even while the controls are in the menu. -->
 										{#if showTerminalSelector}
-											<TerminalMenu
-												bind:show={showTerminalMenu}
-												disabled={generating ||
-													(!!history?.currentId &&
-														history.messages[history.currentId]?.done != true)}
-											/>
+											<div data-terminal-controls class="flex items-center gap-1.5 shrink-0">
+												<TerminalMenu
+													{selectedTerminalId}
+													modelId={selectedModels[0] ?? null}
+													bind:show={showTerminalMenu}
+													{chatId}
+													bind:terminalContext
+													disabled={isActive || !terminalSelectionEnabled}
+												/>
+											</div>
 										{/if}
 
 										{#each pendingOAuthTools as pendingTool (pendingTool.id)}
@@ -2719,16 +3091,23 @@
 									<div class="flex min-w-0 max-w-[10rem] items-center sm:max-w-[13rem]">
 										<ModelSelector
 											bind:this={modelSelector}
+											multipleEnabled={multipleModels}
 											bind:selectedModels
+											{onModelSelect}
 											showSetDefault={!history?.currentId}
 											placement="auto"
 											align="end"
 											triggerClassName="items-center gap-1.5 rounded-lg pl-2 pr-1.5 py-1 text-[0.8125rem] font-normal text-gray-600 transition-colors duration-100 hover:bg-gray-50/40 hover:text-gray-700 dark:text-gray-300 dark:hover:bg-gray-800/40 dark:hover:text-gray-200"
 										/>
 									</div>
-									<ModelControls selectedModels={selectedModelIds} />
+									<ModelControls
+										selectedModels={selectedModelIds}
+										bind:chatFiles
+										bind:params
+										{onParamChange}
+									/>
 
-									{#if isActive && prompt === '' && files.length === 0}
+									{#if isActive && (history.messages[history.currentId]?.user_id ?? $_user?.id) === $_user?.id && prompt === '' && files.length === 0}
 										<div class=" flex items-center">
 											<Tooltip content={$i18n.t('Stop')}>
 												<button
@@ -2759,7 +3138,9 @@
 												<!-- {$i18n.t('Record voice')} -->
 												<Tooltip content={$i18n.t('Dictate')}>
 													<button
-														id="voice-input-button"
+														id={inputId === 'chat-input'
+															? 'voice-input-button'
+															: `${inputId}-voice-input-button`}
 														class=" text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full p-1.5 self-center mr-0.5"
 														type="button"
 														on:click={async () => {
@@ -2796,7 +3177,7 @@
 											{/if}
 										{/if}
 
-										{#if !embedded && prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
+										{#if callEnabled && !embedded && prompt === '' && files.length === 0 && showCallButton}
 											<div class=" flex items-center">
 												<!-- {$i18n.t('Call')} -->
 												<Tooltip
@@ -2808,8 +3189,8 @@
 														type="button"
 														on:click={async () => {
 															if (callActive) {
-																showCallOverlay.set(true);
-																showControls.set(true);
+																voiceCall.set(true);
+																showTabs.set('voice');
 																return;
 															}
 															if (selectedModels.length > 1) {
@@ -2819,18 +3200,11 @@
 															}
 
 															if ($config?.audio?.realtime?.enabled) {
-																showCallOverlay.set(true);
-																showControls.set(true);
+																voiceCall.set(true);
+																showTabs.set(true);
 																return;
 															}
 
-															if ($config.audio.stt.engine === 'web') {
-																toast.error(
-																	$i18n.t('Call feature is not supported when using Web STT engine')
-																);
-
-																return;
-															}
 															// check if user has access to getUserMedia
 															try {
 																let stream = await navigator.mediaDevices.getUserMedia({
@@ -2858,8 +3232,8 @@
 																	}
 																}
 
-																showCallOverlay.set(true);
-																showControls.set(true);
+																voiceCall.set(true);
+																showTabs.set(true);
 															} catch (err) {
 																// If the user denies the permission or an error occurs, show an error message
 																toast.error(
@@ -2877,35 +3251,31 @@
 											</div>
 										{:else}
 											<div class=" flex items-center">
-												<Tooltip
-													content={uploadPending
-														? $i18n.t('Waiting for upload...')
-														: $i18n.t('Send message')}
-												>
+												<!-- Preserve the former upload label for i18n extraction: $i18n.t('Waiting for upload...') -->
+												<Tooltip content={$i18n.t('Send message')}>
 													<button
-														id="send-message-button"
-														class="{!(prompt === '' && files.length === 0) || uploadPending
+														id={inputId === 'chat-input'
+															? 'send-message-button'
+															: `${inputId}-send-message-button`}
+														aria-label={$i18n.t('Send message')}
+														class="{!(prompt === '' && files.length === 0)
 															? 'bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 '
 															: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-full p-[0.3125rem] self-center"
 														type="submit"
-														disabled={(prompt === '' && files.length === 0) || uploadPending}
+														disabled={prompt === '' && files.length === 0}
 													>
-														{#if uploadPending}
-															<Spinner className="size-5" />
-														{:else}
-															<svg
-																xmlns="http://www.w3.org/2000/svg"
-																viewBox="0 0 16 16"
-																fill="currentColor"
-																class="size-5"
-															>
-																<path
-																	fill-rule="evenodd"
-																	d="M8 14a.75.75 0 0 1-.75-.75V4.56L4.03 7.78a.75.75 0 0 1-1.06-1.06l4.5-4.5a.75.75 0 0 1 1.06 0l4.5 4.5a.75.75 0 0 1-1.06 1.06L8.75 4.56v8.69A.75.75 0 0 1 8 14Z"
-																	clip-rule="evenodd"
-																/>
-															</svg>
-														{/if}
+														<svg
+															xmlns="http://www.w3.org/2000/svg"
+															viewBox="0 0 16 16"
+															fill="currentColor"
+															class="size-5"
+														>
+															<path
+																fill-rule="evenodd"
+																d="M8 14a.75.75 0 0 1-.75-.75V4.56L4.03 7.78a.75.75 0 0 1-1.06-1.06l4.5-4.5a.75.75 0 0 1 1.06 0l4.5 4.5a.75.75 0 0 1-1.06 1.06L8.75 4.56v8.69A.75.75 0 0 1 8 14Z"
+																clip-rule="evenodd"
+															/>
+														</svg>
 													</button>
 												</Tooltip>
 											</div>

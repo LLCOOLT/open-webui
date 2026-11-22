@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { onMount, getContext } from 'svelte';
 	import { goto } from '$app/navigation';
+	import type { AppLayoutContext } from '$lib/types';
 	import { getNoteById } from '$lib/apis/notes';
 	import { getUserInfoById } from '$lib/apis/users';
 	import { capitalizeFirstLetter } from '$lib/utils';
 
 	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
+	const appLayout = getContext<AppLayoutContext | undefined>('appLayout');
 
 	export let noteId: string;
 	export let href: string;
@@ -19,7 +21,9 @@
 		try {
 			const note = await getNoteById(localStorage.token, noteId);
 			if (note) {
-				title = note.title || '';
+				const pageId = new URL(href, window.location.origin).searchParams.get('page');
+				const page = note.data?.pages?.find((p) => p.id === pageId);
+				title = page ? `${note.title} / ${page.title}` : note.title || '';
 
 				if (note.user_id) {
 					try {
@@ -48,7 +52,9 @@
 	on:click|preventDefault|stopPropagation={() => {
 		try {
 			const url = new URL(href, window.location.origin);
-			goto(url.pathname);
+			if (appLayout?.openPageTab)
+				appLayout.openPageTab({ href: url.pathname + url.search + url.hash, label: '' });
+			else goto(url.pathname + url.search + url.hash);
 		} catch {
 			// fallback
 		}

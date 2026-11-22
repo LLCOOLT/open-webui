@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import base64
-import io
 import logging
 import time
 from collections import Counter
+from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response
+from open_webui.config import DEFAULT_USER_PERMISSIONS
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.events import EVENTS, publish_event
 from open_webui.env import ENABLE_PROFILE_IMAGE_URL_FORWARDING, PROFILE_IMAGE_ALLOWED_MIME_TYPES, STATIC_DIR
 from open_webui.internal.db import get_async_session
-from open_webui.models.auths import Auths
+from open_webui.models.auths import ApiKey, Auths
 from open_webui.models.config import Config
 from open_webui.models.chat_messages import ChatMessages
 from open_webui.models.chats import Chats
@@ -37,8 +38,9 @@ from open_webui.models.access_grants import AccessGrants
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.models import Models
 from open_webui.models.tools import Tools
-from open_webui.utils.access_control import get_permissions, has_permission
+from open_webui.utils.access_control import fill_missing_permissions, get_permissions, has_permission
 from open_webui.utils.auth import (
+    create_api_key,
     get_admin_user,
     get_password_hash,
     get_verified_user,
@@ -69,11 +71,7 @@ def merge_user_ui_settings(defaults: dict, settings: dict) -> dict:
     return merged
 
 
-############################
-# GetUsers
-# A house is only as strong as its care for the least of
-# its members. Let none here be counted without being served.
-############################
+# Get Users
 
 
 PAGE_ITEM_COUNT = 30
@@ -131,7 +129,25 @@ async def get_all_users(
     user=Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    return await Users.get_users(db=db)
+    result = await Users.get_users(db=db)
+    users = result['users']
+    total = result['total']
+
+    # Look up by group: binding one IN parameter per user breaks past ~32k users
+    groups = await Groups.get_all_groups(db=db)
+    group_user_ids = await Groups.get_group_user_ids_by_ids([group.id for group in groups], db=db)
+
+    groups_by_user = {}
+    for group in groups:
+        for user_id in group_user_ids[group.id]:
+            groups_by_user.setdefault(user_id, []).append({'id': group.id, 'name': group.name})
+
+    return {
+        'users': [
+            UserInfoResponse(**{**user.model_dump(), 'groups': groups_by_user.get(user.id, [])}) for user in users
+        ],
+        'total': total,
+    }
 
 
 @router.get('/search', response_model=UserInfoListResponse)
@@ -161,9 +177,7 @@ async def search_users(
     )
 
 
-############################
 # User Groups
-############################
 
 
 @router.get('/groups')
@@ -173,9 +187,7 @@ async def get_user_groups(
     return await user_groups_response(user.id, include_inherited, db)
 
 
-############################
 # User Permissions
-############################
 
 
 @router.get('/permissions')
@@ -189,9 +201,7 @@ async def get_user_permissisions(
     return user_permissions
 
 
-############################
 # User Default Permissions
-############################
 class WorkspacePermissions(BaseModel):
     models: bool = False
     knowledge: bool = False
@@ -201,6 +211,7 @@ class WorkspacePermissions(BaseModel):
     lorebooks: bool = False
     models_import: bool = False
     models_export: bool = False
+    models_hidden: bool = False
     prompts_import: bool = False
     prompts_export: bool = False
     tools_import: bool = False
@@ -258,6 +269,7 @@ class ChatPermissions(BaseModel):
     call: bool = True
     multiple_models: bool = True
     temporary: bool = True
+    side_chat: bool = False
     temporary_enforced: bool = False
 
 
@@ -265,13 +277,15 @@ class FeaturesPermissions(BaseModel):
     api_keys: bool = False
     notes: bool = True
     channels: bool = True
+    encrypted_channels: bool = False
     folders: bool = True
-    direct_tool_servers: bool = False
 
     web_search: bool = True
     image_generation: bool = True
+    video_generation: bool = False
     code_interpreter: bool = True
     memories: bool = True
+    subagents: bool = True
     automations: bool = False
     calendar: bool = True
     webhooks: bool = False
@@ -415,7 +429,9 @@ def _calculate_streaks(heatmap: list[dict]) -> dict[str, int]:
 
 @router.get('/default/permissions', response_model=UserPermissions)
 async def get_default_user_permissions(request: Request, user=Depends(get_admin_user)):
-    user_permissions = await Config.get('user.permissions')
+    user_permissions = fill_missing_permissions(
+        deepcopy(await Config.get('user.permissions') or {}), DEFAULT_USER_PERMISSIONS
+    )
     return {
         'workspace': WorkspacePermissions(**user_permissions.get('workspace', {})),
         'sharing': SharingPermissions(**user_permissions.get('sharing', {})),
@@ -430,6 +446,12 @@ async def get_default_user_permissions(request: Request, user=Depends(get_admin_
 async def update_default_user_permissions(request: Request, form_data: UserPermissions, user=Depends(get_admin_user)):
     user_permissions = form_data.model_dump(by_alias=True)
     await Config.upsert({'user.permissions': user_permissions})
+    from open_webui.socket.main import sio
+
+    try:
+        await sio.emit('events', {'data': {'type': 'access:updated'}})
+    except Exception:
+        log.exception('Unable to refresh default user permissions')
     await publish_event(
         request,
         EVENTS.USER_PERMISSIONS_UPDATED,
@@ -454,9 +476,7 @@ async def get_default_user_permissions_defaults(user=Depends(get_admin_user)):
     }
 
 
-############################
-# GetUserSettingsBySessionUser
-############################
+# Get User Settings By Session User
 
 
 @router.get('/user/settings', response_model=UserSettings | None)
@@ -479,9 +499,7 @@ async def get_user_settings_by_session_user(
     return UserSettings.model_validate(user_settings)
 
 
-############################
-# UpdateUserSettingsBySessionUser
-############################
+# Update User Settings By Session User
 
 
 @router.post('/user/settings/update', response_model=UserSettings)
@@ -511,28 +529,6 @@ async def update_user_settings_by_session_user(
             )
         ):
             ui_settings.pop('system', None)
-
-        if (
-            user.role != 'admin'
-            and 'params' in ui_settings
-            and (
-                not await has_permission(user.id, 'chat.controls', await Config.get('user.permissions'), db=db)
-                or not await has_permission(user.id, 'chat.params', await Config.get('user.permissions'), db=db)
-            )
-        ):
-            ui_settings.pop('params', None)
-
-    if (
-        user.role != 'admin'
-        and ui_settings is not None
-        and 'toolServers' in ui_settings
-        and not await has_permission(
-            user.id,
-            'features.direct_tool_servers',
-            await Config.get('user.permissions'),
-        )
-    ):
-        ui_settings.pop('toolServers', None)
 
     ui_notifications = ui_settings.get('notifications') if isinstance(ui_settings, dict) else None
     if (
@@ -567,9 +563,7 @@ async def update_user_settings_by_session_user(
         )
 
 
-############################
-# GetUserStatusBySessionUser
-############################
+# Get User Status By Session User
 
 
 @router.get('/user/status')
@@ -586,9 +580,7 @@ async def get_user_status_by_session_user(
     return user
 
 
-############################
-# UpdateUserStatusBySessionUser
-############################
+# Update User Status By Session User
 
 
 @router.post('/user/status/update')
@@ -619,9 +611,7 @@ async def update_user_status_by_session_user(
     )
 
 
-############################
-# GetUserInfoBySessionUser
-############################
+# Get User Info By Session User
 
 
 @router.get('/user/info', response_model=dict | None)
@@ -638,9 +628,7 @@ class UserVariablesResponse(BaseModel):
     variables: dict[str, str] = Field(default_factory=dict)
 
 
-############################
-# GetUserVariablesBySessionUser
-############################
+# Get User Variables By Session User
 
 
 @router.get('/user/variables', response_model=UserVariablesResponse)
@@ -648,9 +636,7 @@ async def get_user_variables_by_session_user(user=Depends(get_verified_user)):
     return UserVariablesResponse(variables=normalize_user_variables(user.variables))
 
 
-############################
-# UpdateUserVariablesBySessionUser
-############################
+# Update User Variables By Session User
 
 
 @router.post('/user/variables/update', response_model=UserVariablesResponse)
@@ -676,9 +662,7 @@ async def update_user_variables_by_session_user(
     return UserVariablesResponse(variables=variables)
 
 
-############################
-# UpdateUserInfoBySessionUser
-############################
+# Update User Info By Session User
 
 
 @router.post('/user/info/update', response_model=dict | None)
@@ -703,9 +687,7 @@ async def update_user_info_by_session_user(  # PATCH-style merge
     return updated.info
 
 
-############################
-# GetUserUsageBySessionUser
-############################
+# Get User Usage By Session User
 
 
 @router.get('/usage', response_model=UserUsageResponse)
@@ -782,9 +764,7 @@ async def get_user_usage_by_session_user(
     )
 
 
-############################
-# GetUserById
-############################
+# Get User By Id
 
 
 class UserActiveResponse(UserStatus):
@@ -851,9 +831,7 @@ async def get_user_oauth_sessions_by_id(
         )
 
 
-############################
-# GetUserProfileImageById
-############################
+# Get User Profile Image By Id
 
 
 @router.get('/{user_id}/profile/image')
@@ -874,14 +852,13 @@ async def get_user_profile_image_by_id(user_id: str, user=Depends(get_verified_u
                 try:
                     header, base64_data = user.profile_image_url.split(',', 1)
                     image_data = base64.b64decode(base64_data)
-                    image_buffer = io.BytesIO(image_data)
                     media_type = header.split(';')[0].lstrip('data:').lower()
 
                     if media_type not in PROFILE_IMAGE_ALLOWED_MIME_TYPES:
                         return FileResponse(f'{STATIC_DIR}/user.png')
 
-                    return StreamingResponse(
-                        image_buffer,
+                    return Response(
+                        content=image_data,
                         media_type=media_type,
                         headers={
                             'Content-Disposition': 'inline',
@@ -898,9 +875,7 @@ async def get_user_profile_image_by_id(user_id: str, user=Depends(get_verified_u
         )
 
 
-############################
-# GetUserActiveStatusById
-############################
+# Get User Active Status By Id
 
 
 @router.get('/{user_id}/active', response_model=dict)
@@ -912,9 +887,7 @@ async def get_user_active_status_by_id(
     }
 
 
-############################
-# UpdateUserById
-############################
+# Update User By Id
 
 
 @router.post('/{user_id}/sessions/revoke', response_model=bool)
@@ -928,6 +901,70 @@ async def revoke_user_sessions(request: Request, user_id: str, session_user=Depe
     await revoke_user_tokens(request, user_id)
     await publish_event(
         request, EVENTS.AUTH_SESSIONS_REVOKED, actor=session_user, subject_id=user_id, subject_type='user'
+    )
+    return True
+
+
+@router.post('/{user_id}/api_key/rotate', response_model=ApiKey)
+async def rotate_user_api_key_by_id(
+    request: Request,
+    response: Response,
+    user_id: str,
+    session_user: UserModel = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    target_user = await Users.get_user_by_id(user_id, db=db)
+    if target_user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.USER_NOT_FOUND)
+
+    first_user = await Users.get_first_user(db=db)
+    if first_user and first_user.id == user_id and session_user.id != user_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.ACTION_PROHIBITED)
+
+    if not await Config.get('auth.enable_api_keys') or (
+        target_user.role != 'admin'
+        and not await has_permission(target_user.id, 'features.api_keys', await Config.get('user.permissions'), db=db)
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.API_KEY_CREATION_NOT_ALLOWED)
+
+    api_key = create_api_key()
+    await Users.update_user_api_key_by_id(user_id, api_key, db=db)
+    await publish_event(
+        request,
+        EVENTS.AUTH_API_KEY_CREATED,
+        actor=session_user,
+        subject_id=user_id,
+        subject_type='user',
+        source='admin',
+    )
+    response.headers['Cache-Control'] = 'no-store'
+    return {'api_key': api_key}
+
+
+@router.delete('/{user_id}/api_key', response_model=bool)
+async def delete_user_api_key_by_id(
+    request: Request,
+    user_id: str,
+    session_user: UserModel = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    target_user = await Users.get_user_by_id(user_id, db=db)
+    if target_user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.USER_NOT_FOUND)
+
+    first_user = await Users.get_first_user(db=db)
+    if first_user and first_user.id == user_id and session_user.id != user_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.ACTION_PROHIBITED)
+
+    # Revocation must remain available when API keys or the user's permission are disabled.
+    await Users.delete_user_api_key_by_id(user_id, db=db)
+    await publish_event(
+        request,
+        EVENTS.AUTH_API_KEY_DELETED,
+        actor=session_user,
+        subject_id=user_id,
+        subject_type='user',
+        source='admin',
     )
     return True
 
@@ -1056,9 +1093,7 @@ async def update_user_by_id(
     )
 
 
-############################
-# DeleteUserById
-############################
+# Delete User By Id
 
 
 @router.delete('/{user_id}', response_model=bool)
@@ -1106,9 +1141,7 @@ async def delete_user_by_id(
     )
 
 
-############################
-# GetUserGroupsById
-############################
+# Get User Groups By Id
 
 
 @router.get('/{user_id}/groups')
@@ -1121,9 +1154,7 @@ async def get_user_groups_by_id(
     return await user_groups_response(user_id, include_inherited, db)
 
 
-############################
-# GetUserPreview
-############################
+# Get User Preview
 
 
 @router.get('/{user_id}/preview')

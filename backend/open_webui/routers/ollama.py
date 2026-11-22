@@ -190,11 +190,7 @@ def get_api_key(idx, url, configs):
     return configs.get(str(idx), configs.get(base_url, {})).get('key', None)  # Legacy support
 
 
-##########################################
-#
 # API routes
-#
-##########################################
 
 router = APIRouter()
 
@@ -1034,6 +1030,7 @@ async def generate_completion(
     if not await Config.get('ollama.enable'):
         raise HTTPException(status_code=503, detail=ERROR_MESSAGES.OLLAMA_API_DISABLED)
 
+    request.state.model_id = form_data.model
     await check_model_access(user, await Models.get_model_by_id(form_data.model), BYPASS_MODEL_ACCESS_CONTROL)
     await validate_ollama_backend_idx(request, form_data.model, url_idx, user)
 
@@ -1138,10 +1135,7 @@ async def generate_chat_completion(
     if not await Config.get('ollama.enable'):
         raise HTTPException(status_code=503, detail=ERROR_MESSAGES.OLLAMA_API_DISABLED)
 
-    # NOTE: We intentionally do NOT use Depends(get_async_session) here.
-    # Database operations (get_model_by_id, AccessGrants.has_access) manage their own short-lived sessions.
-    # This prevents holding a connection during the entire LLM call (30-60+ seconds),
-    # which would exhaust the connection pool under concurrent load.
+    # Let DB helpers own short-lived sessions so remote calls and streams do not hold pool connections.
 
     # bypass_filter and bypass_system_prompt are read from request.state to prevent
     # external clients from setting them via query parameter. Only internal
@@ -1165,6 +1159,8 @@ async def generate_chat_completion(
     payload.pop('metadata', None)
 
     model_id = payload['model']
+    if not hasattr(request.state, 'model_id'):
+        request.state.model_id = model_id
     model_info = await Models.get_model_by_id(model_id)
 
     if model_info is not None:
@@ -1215,7 +1211,7 @@ class OpenAIChatMessage(BaseModel):
     """A single message in an OpenAI-compatible chat request."""
 
     role: str
-    content: Union[str | None, list[OpenAIChatMessageContent]]
+    content: Union[str | None, list[OpenAIChatMessageContent]] = None
     model_config = ConfigDict(extra='allow')
 
 
@@ -1252,10 +1248,7 @@ async def generate_openai_completion(
     user=Depends(get_verified_user),  # noqa: B008
 ):
     """Forward a text completion request via the OpenAI-compatible proxy."""
-    # NOTE: We intentionally do NOT use Depends(get_async_session) here.
-    # Database operations (get_model_by_id, AccessGrants.has_access) manage their own short-lived sessions.
-    # This prevents holding a connection during the entire LLM call (30-60+ seconds),
-    # which would exhaust the connection pool under concurrent load.
+    # Let DB helpers own short-lived sessions so remote calls and streams do not hold pool connections.
     metadata = form_data.pop('metadata', None)
 
     try:
@@ -1267,6 +1260,7 @@ async def generate_openai_completion(
     payload = form_data.model_dump(exclude_none=True, exclude=['metadata'])
 
     model_id = form_data.model
+    request.state.model_id = model_id
     model_info = await Models.get_model_by_id(model_id)
     if model_info is not None:
         if model_info.base_model_id:
@@ -1356,10 +1350,7 @@ async def generate_openai_chat_completion(
     user=Depends(get_verified_user),  # noqa: B008
 ):
     """Forward a chat completion request via the OpenAI-compatible proxy."""
-    # NOTE: We intentionally do NOT use Depends(get_async_session) here.
-    # Database operations (get_model_by_id, AccessGrants.has_access) manage their own short-lived sessions.
-    # This prevents holding a connection during the entire LLM call (30-60+ seconds),
-    # which would exhaust the connection pool under concurrent load.
+    # Let DB helpers own short-lived sessions so remote calls and streams do not hold pool connections.
     metadata = form_data.pop('metadata', None)
 
     try:
@@ -1371,6 +1362,7 @@ async def generate_openai_chat_completion(
     payload = form_data.model_dump(exclude_none=True, exclude=['metadata'])
 
     model_id = form_data.model
+    request.state.model_id = model_id
     model_info = await Models.get_model_by_id(model_id)
     if model_info is not None:
         if model_info.base_model_id:
@@ -1429,6 +1421,7 @@ async def generate_anthropic_messages(
 
     payload = {**form_data}
     model_id = payload.get('model', '')
+    request.state.model_id = model_id
 
     model_info = await Models.get_model_by_id(model_id)
     if model_info:
@@ -1487,6 +1480,7 @@ async def generate_responses(
 
     payload = form_data.model_dump()
     model_id = form_data.model
+    request.state.model_id = model_id
 
     model_info = await Models.get_model_by_id(model_id)
     if model_info:

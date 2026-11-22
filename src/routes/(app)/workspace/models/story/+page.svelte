@@ -1,17 +1,5 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
-	import { onMount } from 'svelte';
-	import { config, user } from '$lib/stores';
-	import StoryImport from '$lib/components/workspace/Models/StoryImport.svelte';
-
-	onMount(() => {
-		// Admin only, like character card import.
-		if ($user?.role !== 'admin' || !$config?.features?.enable_character_cards) {
-			goto('/workspace/models', { replaceState: true });
-		}
-	});
+	import StoryPage from '$lib/components/workspace/Models/StoryPage.svelte';
 </script>
 
-{#if $user?.role === 'admin'}
-	<StoryImport />
-{/if}
+<StoryPage />

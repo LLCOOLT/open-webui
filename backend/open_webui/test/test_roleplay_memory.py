@@ -119,7 +119,7 @@ async def test_character_requests_carry_memory_settings(memory_config, user):
 async def test_compaction_uses_the_overrides(memory_config, monkeypatch):
     captured = {}
 
-    async def fake_summary(request, user, model_id, models, compacted, recent, previous, template):
+    async def fake_summary(request, form_data, user, model_id, models, compacted, recent, previous, template, *_):
         captured.update(template=template, compacted=len(compacted), recent=len(recent))
         return 'Mira and Robin met.'
 
@@ -134,10 +134,15 @@ async def test_compaction_uses_the_overrides(memory_config, monkeypatch):
     settings = await memory_overrides('Mira', 'Robin', {})
     settings.pop('label')
 
+    async def compact(messages, system_prompt, overrides):
+        split = await context_compaction.split_messages(messages, {}, system_prompt, overrides=overrides)
+        kept, summary, compacted = await context_compaction.compact_messages(
+            None, None, None, split, {}, 'mira-model', {}, overrides=overrides
+        )
+        return kept, summary, bool(compacted)
+
     # Global compaction is off (its default), yet the character chat is summarized.
-    kept, summary, compacted = await context_compaction.compact_messages_for_request(
-        None, None, messages, {}, 'mira-model', {}, 'Character block', overrides=settings
-    )
+    kept, summary, compacted = await compact(messages, 'Character block', settings)
     assert compacted is True and summary == 'Mira and Robin met.'
     assert 'between Mira and Robin' in captured['template']
     assert kept[0]['content'] == 'Character block'
@@ -145,16 +150,8 @@ async def test_compaction_uses_the_overrides(memory_config, monkeypatch):
 
     # Under the threshold nothing happens; with memory off for the chat nothing happens either.
     short = messages[:3]
-    assert (
-        await context_compaction.compact_messages_for_request(
-            None, None, short, {}, 'mira-model', {}, '', overrides=settings
-        )
-    )[2] is False
-    assert (
-        await context_compaction.compact_messages_for_request(
-            None, None, messages, {}, 'mira-model', {}, '', overrides={'enable': False}
-        )
-    )[2] is False
+    assert (await compact(short, '', settings))[2] is False
+    assert (await compact(messages, '', {'enable': False}))[2] is False
 
 
 def test_merge_history_keeps_server_written_summaries():
@@ -184,7 +181,7 @@ async def chat_client(user):
 async def test_memory_endpoints(memory_config, user, chat_client, monkeypatch):
     calls = []
 
-    async def fake_summary(request, user, model_id, models, compacted, recent, previous, template):
+    async def fake_summary(request, form_data, user, model_id, models, compacted, recent, previous, template, *_):
         calls.append({'template': template, 'compacted': len(compacted), 'previous': previous})
         return f'Summary {len(calls)}'
 

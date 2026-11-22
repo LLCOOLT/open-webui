@@ -62,13 +62,11 @@ def match_budget():
         _active_budget.reset(token)
 
 
-# =============================================================================
-# SHARED REGEX UTILITIES — also used by builtin.py grep_knowledge_files
-# =============================================================================
+# Shared regex utilities — also used by builtin.py grep_knowledge_files
 
 
 def is_regex_pattern(pattern: str) -> bool:
-    r"""Detect if a pattern looks like regex (|, .*, .+, \d, \w, \s, [...])."""
+    r"""Detect if a pattern looks like regex (|, .*, .+, \d, \w, \s, escaped metacharacters, [...])."""
     return (
         '|' in pattern
         or '.*' in pattern
@@ -78,6 +76,7 @@ def is_regex_pattern(pattern: str) -> bool:
         or r'\w' in pattern
         or r'\s' in pattern
         or bool(re.search(r'\[.+\]', pattern))
+        or bool(re.search(r'\\[.^$|?*+()\[\]{}]', pattern))
     )
 
 
@@ -85,6 +84,57 @@ def normalize_regex(pattern: str) -> str:
     r"""Normalize POSIX BRE patterns to Python regex (\| → |)."""
     # Two passes: an escaped backslash in front of a pipe leaves a second escape behind.
     return pattern.replace(r'\|', '|').replace(r'\|', '|')
+
+
+def _compile_search_regex(pattern: str, case_insensitive: bool, literal: bool = False) -> tuple:
+    try:
+        options = re2.Options()
+        options.case_sensitive = not case_insensitive
+        options.literal = literal
+        options.max_mem = 1 << 20  # Bound compiled programs and the engine's matching cache to 1 MiB.
+        options.log_errors = False
+        return re2.compile(pattern if literal else normalize_regex(pattern), options=options), None
+    except re2.error as e:
+        return None, f'Invalid or unsupported regex (RE2 syntax): {e}'
+
+
+def build_span_matcher(pattern: str, case_insensitive: bool = False, *, deadline: float | None = None) -> tuple:
+    """Yield non-empty, non-overlapping character spans against the original text."""
+    deadline = deadline if deadline is not None else time.monotonic() + MATCH_BUDGET_SECONDS
+    if len(pattern) > MAX_SEARCH_PATTERN_LENGTH:
+        return None, f'Search patterns over {MAX_SEARCH_PATTERN_LENGTH} characters are not supported'
+    if not pattern or not pattern.strip():
+        return None, 'Pattern is required'
+    regex = is_regex_pattern(pattern)
+    if regex or case_insensitive:
+        compiled, error = _compile_search_regex(pattern, case_insensitive, literal=not regex)
+        if error:
+            return None, error
+
+        def spans(line):
+            for match in compiled.finditer(line):
+                yield match.span()
+
+    else:
+
+        def spans(line):
+            offset = 0
+            while (start := line.find(pattern, offset)) != -1:
+                offset = start + len(pattern)
+                yield start, offset
+
+    def checked_spans(line):
+        if time.monotonic() >= deadline:
+            raise MatchBudgetExceeded(f'Search exceeded {MATCH_BUDGET_SECONDS:g}s, narrow the pattern')
+        for start, end in spans(line):
+            if time.monotonic() >= deadline:
+                raise MatchBudgetExceeded(f'Search exceeded {MATCH_BUDGET_SECONDS:g}s, narrow the pattern')
+            if end > start:
+                yield start, end
+        if time.monotonic() >= deadline:
+            raise MatchBudgetExceeded(f'Search exceeded {MATCH_BUDGET_SECONDS:g}s, narrow the pattern')
+
+    return checked_spans, None
 
 
 def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool = False) -> tuple:
@@ -96,15 +146,9 @@ def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool 
         use_regex = True
 
     if use_regex:
-        normalized = normalize_regex(pattern)
-        try:
-            options = re2.Options()
-            options.case_sensitive = not case_insensitive
-            options.max_mem = 1 << 20  # Bound compiled programs and the engine's matching cache to 1 MiB.
-            options.log_errors = False
-            compiled = re2.compile(normalized, options=options)
-        except re2.error as e:
-            return None, f'Invalid or unsupported regex (RE2 syntax): {e}'
+        compiled, error = _compile_search_regex(pattern, case_insensitive)
+        if error:
+            return None, error
 
         budget = _active_budget.get() or MatchBudget()
 
@@ -128,9 +172,7 @@ def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool 
         return (lambda line: sp in (line.lower() if case_insensitive else line)), None
 
 
-# =============================================================================
-# COMMAND PARSING
-# =============================================================================
+# Command parsing
 
 
 def _parse_pipeline(command: str) -> list[list[str]]:
@@ -203,9 +245,7 @@ def _extract_numeric_flag(tokens: list[str]) -> tuple[Optional[int], list[str]]:
     return num, remaining
 
 
-# =============================================================================
-# DIRECTORY TREE & PATH RESOLUTION
-# =============================================================================
+# Directory tree & path resolution
 
 
 async def _build_directory_tree(knowledge_id: str) -> dict:
@@ -299,9 +339,7 @@ def _get_files_under_dir(tree: dict, dir_id: str) -> list[dict]:
     return [f for f in tree['files'] if f['directory_id'] in target_ids]
 
 
-# =============================================================================
-# FILE RESOLUTION & ACCESS CONTROL
-# =============================================================================
+# File resolution & access control
 
 
 async def _get_accessible_kb_ids(
@@ -528,9 +566,7 @@ async def _get_file_content(file_id: str) -> str | None:
     return None
 
 
-# =============================================================================
-# COMMAND HANDLERS
-# =============================================================================
+# Command handlers
 
 
 async def _kb_ls(args: list[str], flags: set[str], user: dict, model_knowledge: list[dict] | None) -> str:
@@ -1018,9 +1054,7 @@ async def _kb_sed(
     return result
 
 
-# =============================================================================
-# PIPE EXECUTOR
-# =============================================================================
+# Pipe executor
 
 
 async def _kb_tree(args: list[str], flags: set[str], user: dict, model_knowledge: list[dict] | None) -> str:
@@ -1132,9 +1166,7 @@ async def _execute_pipeline(
     return piped_input or ''
 
 
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
+# Entry point
 
 
 async def kb_exec(
