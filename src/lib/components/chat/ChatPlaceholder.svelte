@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { characterImageUrl } from '$lib/utils/characters';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
@@ -91,7 +92,10 @@
 							placement="right"
 						>
 							<img
-								src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`}
+								src={characterImageUrl(
+									model,
+									`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`
+								)}
 								class=" size-[2.7rem] rounded-full"
 								alt=""
 								draggable="false"

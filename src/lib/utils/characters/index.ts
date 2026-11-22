@@ -202,3 +202,42 @@ export const looksLikeCharacterCard = (text: string): boolean => {
 	];
 	return labels.size >= 3 || (labels.size >= 2 && roleplay.some((label) => labels.has(label)));
 };
+
+const CARD_START_RE =
+	/^\s*(?:#{1,6}\s*|\*\*|__)?\s*(?:name|character name|character)\s*(?:\*\*|__)?\s*:/i;
+
+/**
+ * The character card inside a chat message, or null: a card in a code block, or the message from
+ * its first "Name:" line on (so "Here's your card:" before it is left out).
+ */
+export const extractCharacterCard = (text: string): string | null => {
+	if (!text?.trim()) return null;
+	for (const match of text.matchAll(/```[\w-]*[ \t]*\n([\s\S]*?)```/g)) {
+		if (looksLikeCharacterCard(match[1])) return match[1].trim();
+	}
+	if (!looksLikeCharacterCard(text)) return null;
+	const lines = text.split('\n');
+	const start = lines.findIndex((line) => CARD_START_RE.test(line));
+	const card = (start > 0 ? lines.slice(start) : lines).join('\n').trim();
+	// "Want me to adjust anything?" after the card is the assistant talking, not part of it.
+	return card.replace(/\n\s*\n[^\n]{1,160}\?\s*$/, '').trim();
+};
+
+/** A picture for a character without one: its initial on a colour that stays the same per name. */
+export const placeholderAvatar = (name = ''): string => {
+	const hue = [...name].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 360;
+	const initial = (name.trim()[0] ?? '?').toUpperCase().replace(/[<>&"']/g, '');
+	const svg =
+		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">` +
+		`<stop offset="0" stop-color="hsl(${hue} 45% 62%)"/><stop offset="1" stop-color="hsl(${(hue + 40) % 360} 40% 42%)"/>` +
+		`</linearGradient></defs><rect width="96" height="96" fill="url(#g)"/>` +
+		`<text x="48" y="50" dominant-baseline="central" text-anchor="middle" font-family="system-ui,sans-serif" ` +
+		`font-size="44" fill="rgba(255,255,255,0.92)">${initial}</text></svg>`;
+	return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+};
+
+/** ``url`` (the model's profile image), unless the model is a character without a picture. */
+export const characterImageUrl = (model: any, url: string): string =>
+	model?.info?.meta?.character && model.info.meta.character.has_avatar === false
+		? placeholderAvatar(model.name || model.info.meta.character.name || '')
+		: url;

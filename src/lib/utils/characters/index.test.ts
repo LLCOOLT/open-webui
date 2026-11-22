@@ -124,3 +124,30 @@ describe('looksLikeCharacterCard', async () => {
 		expect(looksLikeCharacterCard('')).toBe(false);
 	});
 });
+
+describe('extractCharacterCard', async () => {
+	const { extractCharacterCard, characterImageUrl } = await import('./index');
+	const card = 'Name: Lena\n\n## Personality tags\n- dry\n\n## Appearance & vibe\nTired but sharp';
+
+	it('takes the card out of a reply', () => {
+		expect(extractCharacterCard(`Here's your card!\n\n${card}\n`)).toBe(card);
+		expect(
+			extractCharacterCard(`Here's your card!\n\n${card}\n\nWant me to adjust anything?`)
+		).toBe(card);
+		expect(extractCharacterCard(`Sure:\n\`\`\`markdown\n${card}\n\`\`\`\nWant changes?`)).toBe(
+			card
+		);
+		expect(extractCharacterCard('Just a normal reply about cats.')).toBeNull();
+	});
+
+	it('uses a placeholder only for characters without a picture', () => {
+		const url = '/api/v1/models/model/profile/image?id=x';
+		expect(characterImageUrl({ info: { meta: {} } }, url)).toBe(url);
+		expect(
+			characterImageUrl({ name: 'Lena', info: { meta: { character: { has_avatar: true } } } }, url)
+		).toBe(url);
+		expect(
+			characterImageUrl({ name: 'Lena', info: { meta: { character: { has_avatar: false } } } }, url)
+		).toMatch(/^data:image\/svg\+xml/);
+	});
+});

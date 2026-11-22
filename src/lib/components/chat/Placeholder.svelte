@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { characterImageUrl } from '$lib/utils/characters';
 	import type { TerminalContext } from '$lib/types';
 	import type { Writable } from 'svelte/store';
 	import { toast } from 'svelte-sonner';
@@ -273,7 +274,10 @@
 										}}
 									>
 										<img
-											src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`}
+											src={characterImageUrl(
+												model,
+												`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`
+											)}
 											class=" size-9 @sm:size-10 rounded-2xl"
 											aria-hidden="true"
 											draggable="false"

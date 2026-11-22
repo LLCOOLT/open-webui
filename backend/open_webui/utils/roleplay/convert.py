@@ -153,6 +153,79 @@ def _header(line: str) -> tuple[str, str, bool] | None:
     return field_name, TRAILING_CLOSING_TAG_RE.sub('', rest), closed
 
 
+# Headings that are not card labels ("## Psychology & behavioral triggers", "**Core contradiction**"),
+# routed by topic. Checked in order; the heading is kept in the field as context.
+TOPIC_KEYWORDS = (
+    ('first_mes', ('first message', 'greeting', 'opening line')),
+    ('scenario', ('scenario', 'current status', 'current situation', 'setting', 'premise', 'where they are')),
+    ('system_prompt', ('rule', 'instruction', 'guideline', 'writing style', 'formatting', 'response style')),
+    (
+        'personality',
+        (
+            'personality',
+            'psycholog',
+            'trait',
+            'quirk',
+            'like',
+            'fear',
+            'hobb',
+            'interest',
+            'contradiction',
+            'voice',
+            'tone',
+            'speech',
+            'mannerism',
+            'behavio',
+            'temperament',
+            'trigger',
+            'values',
+            'flaw',
+        ),
+    ),
+    (
+        'description',
+        (
+            'identity',
+            'appearance',
+            'look',
+            'body',
+            'presence',
+            'backstory',
+            'history',
+            'background',
+            'abilit',
+            'skill',
+            'weakness',
+            'power',
+            'relationship',
+            'goal',
+            'occupation',
+            'bio',
+            'origin',
+            'vibe',
+            'outfit',
+            'clothes',
+        ),
+    ),
+)
+HEADING_RE = re.compile(r'^\s*(?:#{1,6}\s+(?P<hash>.+?)|\*\*(?P<bold>[^*]+?)\*\*)\s*:?\s*$')
+
+
+def _topic_header(line: str) -> tuple[str, str] | None:
+    """``(field, heading)`` for a standalone heading line whose topic belongs to a card field."""
+    match = HEADING_RE.match(line)
+    if not match:
+        return None
+    heading = (match.group('hash') or match.group('bold') or '').strip().rstrip(':').strip()
+    lowered = heading.lower()
+    if not heading or len(heading) > 60:
+        return None
+    for field_name, keywords in TOPIC_KEYWORDS:
+        if any(keyword in lowered for keyword in keywords):
+            return field_name, heading
+    return None
+
+
 def _sections(text: str) -> tuple[str, dict[str, list[str]]]:
     preamble: list[str] = []
     sections: dict[str, list[str]] = {}
@@ -170,6 +243,15 @@ def _sections(text: str) -> tuple[str, dict[str, list[str]]]:
             if rest:
                 section.append(rest)
             current = preamble if closed else section
+            continue
+        topic = _topic_header(line)
+        if topic:
+            field_name, heading = topic
+            section = sections.setdefault(field_name, [])
+            if section:
+                section.append('')
+            section.append(f'{heading}:')
+            current = section
             continue
         current.append(line)
     return '\n'.join(preamble).strip(), {key: '\n'.join(lines).strip() for key, lines in sections.items()}
@@ -204,10 +286,22 @@ def _unquote(text: str) -> str:
     return text
 
 
+def _speakers(name: str) -> str:
+    names = [re.escape(part) for part in dict.fromkeys([name, *name.split()]) if len(part) > 1] if name else []
+    return rf'(?:{CHAR_SPEAKERS}|{"|".join(names)})' if names else CHAR_SPEAKERS
+
+
+def _has_dialogue(text: str, name: str) -> bool:
+    """Whether example text has speaker lines ("{{user}}: ...", "Mara: ...") or <START> blocks."""
+    if '<START>' in text.upper():
+        return True
+    speaker = rf'^\s*\**(?:{USER_SPEAKERS}|{_speakers(name)})\**\s*:'
+    return re.search(speaker, text, re.IGNORECASE | re.MULTILINE) is not None
+
+
 def _example_dialogue(text: str, name: str) -> str:
     # "Captain Mara Voss" speaks as "Mara" too.
-    names = [re.escape(part) for part in dict.fromkeys([name, *name.split()]) if len(part) > 1] if name else []
-    speaker_char = rf'(?:{CHAR_SPEAKERS}|{"|".join(names)})' if names else CHAR_SPEAKERS
+    speaker_char = _speakers(name)
     lines = []
     for line in text.split('\n'):
         line = re.sub(rf'^\s*\**{USER_SPEAKERS}\**\s*:\s*', '{{user}}: ', line, flags=re.IGNORECASE)
@@ -252,10 +346,18 @@ def parse_system_prompt(system: str, model_name: str = '') -> Conversion:
     character['description'] = '\n\n'.join(part for part in (preamble, name_rest, character['description']) if part)
     if character['first_mes']:
         character['first_mes'] = _unquote(character['first_mes'])
+    if character['mes_example'] and not _has_dialogue(character['mes_example'], name):
+        # "Voice: gruff, short sentences" under an examples heading describes how they talk.
+        character['personality'] = '\n\n'.join(
+            part for part in (character['personality'], character['mes_example']) if part
+        )
+        character['mes_example'] = ''
     if character['mes_example']:
         character['mes_example'] = _example_dialogue(character['mes_example'], name)
 
     for key in TEXT_FIELDS:
+        # Sections are joined with one blank line, however they were spaced in the source.
+        character[key] = re.sub(r'\n\s*\n(?:\s*\n)+', '\n\n', character[key])
         if key not in ('name', 'creator_notes'):
             character[key] = _with_macros(character[key], name)
     character['name'] = name

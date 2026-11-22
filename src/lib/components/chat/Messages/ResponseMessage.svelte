@@ -1,4 +1,9 @@
 <script lang="ts">
+	import { characterImageUrl, extractCharacterCard } from '$lib/utils/characters';
+	import { getPageContext } from '$lib/utils/page';
+	import { getModels } from '$lib/apis';
+	import { models as allModels } from '$lib/stores';
+	import PasteCharacterModal from '$lib/components/workspace/Models/PasteCharacterModal.svelte';
 	import EditPencilIcon from '$lib/components/layout/Sidebar/icons/EditPencil.svelte';
 	import CopyIcon from '$lib/components/layout/Sidebar/icons/Copy.svelte';
 	import TrashIcon from '$lib/components/layout/Sidebar/icons/Trash.svelte';
@@ -72,6 +77,23 @@
 	import { getChatContext } from '$lib/components/chat/context';
 
 	const { audioQueue, models } = getChatContext();
+	const { goto: goToPage } = getPageContext();
+
+	// A reply that is a character card (e.g. one written here on request) can become a character.
+	$: cardText =
+		message.done &&
+		!readOnly &&
+		!compactPreview &&
+		($config?.features?.enable_character_cards ?? false) &&
+		($user?.role === 'admin' || !!$user?.permissions?.workspace?.models)
+			? extractCharacterCard(visibleResponseContent ?? '')
+			: null;
+	let showCardModal = false;
+	// The base model of this chat's model, to suggest for the new character.
+	$: cardBaseModelId =
+		(($models ?? []).find((m: any) => m.id === message.model) as any)?.info?.base_model_id ??
+		message.model ??
+		null;
 
 	interface MessageType {
 		user_id?: string;
@@ -824,7 +846,10 @@
 			<ProfileImage
 				src={expressionName
 					? characterExpressionUrl(model?.id ?? message.model, expressionName)
-					: `${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id ?? message.model}&lang=${$i18n.language}`}
+					: characterImageUrl(
+							model,
+							`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id ?? message.model}&lang=${$i18n.language}`
+						)}
 				className={'size-7 assistant-message-profile-image object-top'}
 			/>
 		</div>
@@ -1100,6 +1125,34 @@
 						</div>
 					</div>
 				</div>
+
+				{#if cardText}
+					<div
+						class="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2 text-xs"
+					>
+						<span class="text-gray-600 dark:text-gray-400">
+							{$i18n.t('This reply looks like a character card.')}
+						</span>
+						<button
+							type="button"
+							class="px-2.5 py-1 rounded-lg bg-black text-white dark:bg-white dark:text-black hover:opacity-90 transition"
+							on:click={() => (showCardModal = true)}
+						>
+							{$i18n.t('Create character')}
+						</button>
+					</div>
+					{#if showCardModal}
+						<PasteCharacterModal
+							bind:show={showCardModal}
+							initialText={cardText}
+							defaultBaseModelId={cardBaseModelId}
+							onCreated={async (created) => {
+								allModels.set(await getModels(localStorage.token));
+								goToPage(`/?models=${encodeURIComponent(created.id)}`);
+							}}
+						/>
+					{/if}
+				{/if}
 
 				{#if compactPreview && responseTimestamp}
 					<div class="mt-0.5 flex justify-start whitespace-nowrap text-gray-600 dark:text-gray-500">

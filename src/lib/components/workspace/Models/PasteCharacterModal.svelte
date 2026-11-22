@@ -18,6 +18,9 @@
 
 	export let show = false;
 	export let onCreated: (model: any) => void = () => {};
+	// Opened from a chat message that holds a card: start at the review with this text.
+	export let initialText = '';
+	export let defaultBaseModelId: string | null = null;
 
 	let step: 'paste' | 'review' = 'paste';
 	let text = '';
@@ -34,7 +37,21 @@
 
 	$: if (!show) reset();
 
+	let opened = false;
+	$: if (show && !opened) open();
+	const open = () => {
+		opened = true;
+		if (defaultBaseModelId && baseModelItems.some((item) => item.value === defaultBaseModelId)) {
+			baseModelId = defaultBaseModelId;
+		}
+		if (initialText.trim()) {
+			text = initialText;
+			read(false);
+		}
+	};
+
 	const reset = () => {
+		opened = false;
 		step = 'paste';
 		text = '';
 		character = null;
@@ -49,7 +66,11 @@
 		{ key: 'first_mes', label: $i18n.t('First Message'), rows: 3 },
 		{ key: 'mes_example', label: $i18n.t('Example Dialogue'), rows: 3 },
 		{ key: 'system_prompt', label: $i18n.t('Character System Prompt'), rows: 2 },
-		{ key: 'creator_notes', label: $i18n.t('Creator Notes'), rows: 2 }
+		{
+			key: 'creator_notes',
+			label: $i18n.t('Creator Notes (shown to people, not sent to the model)'),
+			rows: 2
+		}
 	];
 
 	const read = async (useAi: boolean) => {

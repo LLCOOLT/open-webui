@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { characterImageUrl } from '$lib/utils/characters';
 	import type { CommentsRequest } from '$lib/components/comments/CommentsPanel.svelte';
 	export let onComment: (request: CommentsRequest) => void;
 	import { marked } from 'marked';
@@ -105,7 +106,10 @@
 			<div class="flex items-center min-w-fit">
 				<Tooltip content={$user?.role === 'admin' ? (item?.value ?? '') : ''} placement="top-start">
 					<img
-						src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${item.model.id}&lang=${$i18n.language}`}
+						src={characterImageUrl(
+							item.model,
+							`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${item.model.id}&lang=${$i18n.language}`
+						)}
 						alt={$i18n.t('{{modelName}} profile image', { modelName: item.label })}
 						class="flex size-4 items-center rounded-full"
 						loading="lazy"

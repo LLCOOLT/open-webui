@@ -1,6 +1,6 @@
 import pytest
 
-from open_webui.utils.roleplay.convert import character_from_ai_reply, parse_system_prompt
+from open_webui.utils.roleplay.convert import LABEL_TO_FIELD, character_from_ai_reply, parse_system_prompt
 
 LABELLED = """You are Seraphina, the guardian of an enchanted forest.
 
@@ -226,3 +226,98 @@ def test_pasted_json_card():
     assert card_from_json_text('{"name": "Ana", "personality": "shy"}').character['personality'] == 'shy'
     assert card_from_json_text('You are Max. {not json}') is None
     assert card_from_json_text('{"title": "no name here"}') is None
+
+
+# A long-form template with headings that are not card labels (as a user writes cards in another chat).
+TEMPLATE_CARD = """Name: Lena Hart
+
+## Identity
+Full name: Lena Marie Hart
+Aliases: Hart
+Age: 29
+Occupation: Night-shift paramedic
+Goal: Make enough to leave the city
+
+## Current status
+Where they are now: Parked outside the hospital at 3 a.m.
+How they feel about it: Exhausted, restless
+
+## Appearance & vibe
+Height: 5'7"
+Hair: Short, dark, always messy
+Overall vibe: Tired but sharp
+
+## Presence & body language
+Leans on things. Taps her keys when she is thinking.
+
+## Backstory
+Grew up above her father's pharmacy.
+
+## Abilities & skills & weaknesses
+Calm in a crisis; terrible at asking for help.
+
+## Personality tags
+- dry
+- protective
+
+## Psychology & behavioral triggers
+- Goes quiet when someone raises their voice.
+
+## Core contradiction
+Saves strangers nightly, keeps everyone she knows at arm's length.
+
+## Hobbies & interests
+- Night drives
+
+## Likes, dislikes & fears
+Likes:
+- Rain
+Dislikes:
+- Small talk
+Fears:
+- Hospitals as a patient
+
+## Quirks
+Names every ambulance she drives.
+
+## Personal goal
+Buy a house by the sea.
+
+## Relationships
+- Sam: partner on shift, the only one she trusts
+
+## Voice & example dialogue
+Tone: clipped, deadpan
+Other lines:
+- "You're fine. Probably."
+
+## Notes
+Keep her guarded for the first few chats.
+"""
+
+
+def test_long_form_template():
+    result = parse_system_prompt(TEMPLATE_CARD, 'fallback')
+    character = result.character
+    assert character['name'] == 'Lena Hart'
+    description, personality = character['description'], character['personality']
+    # Who she is and how she looks: description, with the headings kept for context.
+    for text in ('Night-shift paramedic', 'Appearance & vibe:', 'Taps her keys', "father's pharmacy",
+                 'Calm in a crisis', 'Personal goal:', 'Sam: partner on shift'):
+        assert text in description, text
+    # How she thinks and talks: personality.
+    for text in ('- dry', 'Goes quiet', 'Core contradiction:', 'Night drives', 'Small talk',
+                 'Names every ambulance', 'Tone: clipped, deadpan', "You're fine. Probably."):
+        assert text in personality, text
+    assert 'Parked outside the hospital' in character['scenario']
+    assert character['creator_notes'] == 'Keep her guarded for the first few chats.'
+    assert character['mes_example'] == ''
+    # Nothing was dropped.
+    every_field = '\n'.join(str(value) for value in character.values())
+    for line in TEMPLATE_CARD.splitlines():
+        text = line.strip().lstrip('#').strip().rstrip(':').strip()
+        # Headings that are card labels themselves ("## Backstory") only mark where a field starts.
+        if line.startswith('#') and text.lower() in LABEL_TO_FIELD:
+            continue
+        if text and not text.startswith('Name'):
+            assert text.replace('Lena Hart', '{{char}}') in every_field.replace('Lena Hart', '{{char}}'), text

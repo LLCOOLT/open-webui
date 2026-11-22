@@ -7,6 +7,7 @@
 	import { getContext } from 'svelte';
 	import { WEBUI_NAME, config, mobile, models, showSidebar, user } from '$lib/stores';
 	import { getModels } from '$lib/apis';
+	import { characterImageUrl } from '$lib/utils/characters';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 	import PageTitle from '$lib/components/common/PageTitle.svelte';
@@ -40,7 +41,10 @@
 				name: model.name || character.name,
 				blurb: (model.info.meta.description || character.creator_notes || '').trim(),
 				greetings: character.greeting_count ?? 0,
-				hasAvatar: character.has_avatar ?? true,
+				image: characterImageUrl(
+					model,
+					`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${encodeURIComponent(model.id)}`
+				),
 				tags: [...new Set(tags)].slice(0, 4),
 				editable: isAdmin || model.info.user_id === $user?.id
 			};
@@ -55,9 +59,6 @@
 					.includes(query.trim().toLowerCase())
 			)
 		: characters;
-
-	// A soft colour per character for the placeholder picture, stable across visits.
-	const hue = (text: string) => [...text].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 360;
 
 	const startChat = (id: string) => goto(`/?models=${encodeURIComponent(id)}`);
 
@@ -153,24 +154,12 @@
 								aria-label={$i18n.t('Chat with {{NAME}}', { NAME: character.name })}
 								on:click={() => startChat(character.id)}
 							>
-								{#if character.hasAvatar}
-									<img
-										src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${encodeURIComponent(character.id)}`}
-										alt=""
-										loading="lazy"
-										class="aspect-[3/4] w-full object-cover bg-gray-100 dark:bg-gray-800"
-									/>
-								{:else}
-									<div
-										class="aspect-[3/4] w-full flex items-center justify-center text-5xl font-medium text-white/90 select-none"
-										style="background: linear-gradient(160deg, hsl({hue(
-											character.name
-										)} 45% 62%), hsl({(hue(character.name) + 40) % 360} 40% 42%))"
-										aria-hidden="true"
-									>
-										{character.name.slice(0, 1).toUpperCase()}
-									</div>
-								{/if}
+								<img
+									src={character.image}
+									alt=""
+									loading="lazy"
+									class="aspect-[3/4] w-full object-cover bg-gray-100 dark:bg-gray-800"
+								/>
 								<div class="p-2.5">
 									<div class="font-medium text-sm truncate">{character.name}</div>
 									{#if character.blurb}

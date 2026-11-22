@@ -995,9 +995,7 @@
 		const model: any =
 			selectedModels.length === 1 ? $models.find((m) => m.id === selectedModels[0]) : null;
 		const modelId: string | null =
-			$config?.features?.enable_character_cards && model?.info?.meta?.character?.greeting_count
-				? model.id
-				: null;
+			$config?.features?.enable_character_cards && model?.info?.meta?.character ? model.id : null;
 		const seeded = history.currentId !== null;
 		if (modelId === greetingModelId && (seeded || !modelId || greetingChoices?.modelId === modelId))
 			return;
@@ -1005,7 +1003,7 @@
 		greetingChoices = null;
 
 		let greetings: string[] = [];
-		if (modelId) {
+		if (modelId && model.info.meta.character.greeting_count) {
 			try {
 				greetings = await getCharacterGreetings(localStorage.token, modelId);
 			} catch (error) {
@@ -1015,7 +1013,8 @@
 		// The selection or the chat may have changed while the greetings loaded.
 		if (greetingModelId !== modelId || $chatId || !hasOnlyGreetings()) return;
 
-		if (modelId && greetings.length && !($settings?.characterCardGreeting ?? false)) {
+		// A card without greetings still offers to let the character open the chat.
+		if (modelId && (!greetings.length || !($settings?.characterCardGreeting ?? false))) {
 			if (seeded) history = { messages: {}, currentId: null } as any;
 			greetingChoices = { modelId, name: model.name ?? model.id, greetings };
 			return;
