@@ -2414,6 +2414,36 @@
 		fail();
 	};
 
+	// The refresh button by the message input: catch up with the server by hand. Unlike refreshChat
+	// it never leaves the chat when the server is unreachable, and it takes the server's word for
+	// replies the server has finished (clearing a "Load failed" left on them).
+	const refreshMessages = async () => {
+		const id = $chatId;
+		if (!id || !isSavedChatId(id)) return;
+		if ($socket && !$socket.connected) $socket.connect();
+		if (hasPendingAssistantLeaf() && (await resyncPendingReplies(id)) === false) {
+			toast.error($i18n.t('Could not reach the server. Check your connection and try again.'));
+			return;
+		}
+		const baseline = { ...history.messages };
+		const fresh = await getChatById(localStorage.token, id).catch(() => null);
+		if ($chatId !== id) return;
+		if (!fresh?.chat?.history) {
+			toast.error($i18n.t('Could not reach the server. Check your connection and try again.'));
+			return;
+		}
+		chat = fresh;
+		mergeChatMessages(fresh.chat.history, baseline);
+		for (const [messageId, message] of Object.entries(fresh.chat.history.messages ?? {}) as [
+			string,
+			any
+		][]) {
+			const local = history.messages[messageId];
+			if (local?.error && message.done && !message.error) delete local.error;
+		}
+		history = history;
+	};
+
 	// iOS drops connections of a backgrounded page without telling it, so events sent meanwhile are
 	// lost and the socket only notices after its ping timeout. Catch up as soon as the page is back.
 	const handleVisibilityChange = () => {
@@ -6666,6 +6696,7 @@
 										bind:dragged
 										{dropzoneId}
 										chatId={$chatId}
+										onRefresh={isSavedChatId($chatId) && !isShared ? refreshMessages : null}
 										{contextUsage}
 										{contextCompactionEnabled}
 										{embedded}
@@ -6789,6 +6820,7 @@
 										bind:dragged
 										{dropzoneId}
 										chatId={$chatId}
+										onRefresh={isSavedChatId($chatId) && !isShared ? refreshMessages : null}
 										{contextUsage}
 										{contextCompactionEnabled}
 										{embedded}

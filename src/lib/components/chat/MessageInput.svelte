@@ -107,6 +107,7 @@
 	import FileItem from '../common/FileItem.svelte';
 	import Image from '../common/Image.svelte';
 	import Spinner from '../common/Spinner.svelte';
+	import ArrowPath from '../icons/ArrowPath.svelte';
 
 	import XMark from '../icons/XMark.svelte';
 	import GlobeAlt from '../icons/GlobeAlt.svelte';
@@ -175,6 +176,19 @@
 	export let statusHandler: Function = () => {};
 	export let forkHandler: Function = () => {};
 	export let chatId = '';
+	// Set for saved chats: pulls the latest messages from the server (a reply that finished while
+	// the connection was down, or one written on another device).
+	export let onRefresh: (() => Promise<void>) | null = null;
+	let refreshing = false;
+	const refresh = async () => {
+		if (!onRefresh || refreshing) return;
+		refreshing = true;
+		try {
+			await onRefresh();
+		} finally {
+			refreshing = false;
+		}
+	};
 	export let inputId = 'chat-input';
 	export let messagesContainerId = 'messages-container';
 	export let onTemporaryChange: ((value: boolean) => void) | null = null;
@@ -2065,6 +2079,24 @@
 									{typingUsers.length === 1 ? $i18n.t('is typing...') : $i18n.t('are typing...')}
 								</div>
 							</div>
+						</div>
+					{/if}
+					{#if onRefresh && history?.currentId}
+						<div class="absolute -top-12 right-0 flex z-30 pointer-events-none">
+							<Tooltip content={$i18n.t('Refresh messages')} placement="top">
+								<button
+									type="button"
+									aria-label={$i18n.t('Refresh messages')}
+									disabled={refreshing}
+									class="bg-white border border-gray-100 dark:border-none dark:bg-white/20 p-1.5 rounded-full pointer-events-auto text-gray-600 dark:text-gray-200 opacity-70 hover:opacity-100 transition disabled:cursor-wait"
+									on:click={refresh}
+								>
+									<ArrowPath
+										className="size-5 {refreshing ? 'animate-spin' : ''}"
+										strokeWidth="2"
+									/>
+								</button>
+							</Tooltip>
 						</div>
 					{/if}
 					{#if autoScroll === false && history?.currentId}
