@@ -27,6 +27,7 @@
 		visibleControls
 	} from '$lib/stores';
 	import Link from '$lib/components/icons/Link.svelte';
+	import FaceSmile from '$lib/components/icons/FaceSmile.svelte';
 	import { resolveLocalizedModelName } from '$lib/utils/localizedContent';
 
 	const i18n = getContext<any>('i18n');
@@ -40,6 +41,8 @@
 	export let exportHandler: Function;
 	// Set for character models the user can write; exports a character card.
 	export let exportCharacterHandler: ((format: 'png' | 'json') => void) | null = null;
+	// Offered for presets that are not characters yet; opens the editor with the character switch on.
+	export let convertToCharacterHandler: (() => void) | null = null;
 	export let copyLinkHandler: Function;
 
 	export let hideHandler: Function;
@@ -194,6 +197,17 @@
 					<DocumentDuplicate />
 
 					<div class="flex items-center">{$i18n.t('Clone')}</div>
+				</button>
+			{/if}
+
+			{#if writeAccess && convertToCharacterHandler}
+				<button
+					class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] hover:text-gray-900 dark:hover:text-gray-100"
+					on:click={() => runAndClose(convertToCharacterHandler)}
+				>
+					<FaceSmile />
+
+					<div class="flex items-center">{$i18n.t('Convert to Character')}</div>
 				</button>
 			{/if}
 

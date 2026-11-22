@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getPageContext, onTabLeave } from '$lib/utils/page';
-	const { goto } = getPageContext();
+	const { goto, url: pageUrl } = getPageContext();
 
 	import Comments from '$lib/components/comments/Comments.svelte';
 	import type { CommentsRequest } from '$lib/components/comments/CommentsPanel.svelte';
@@ -96,6 +96,8 @@
 	export let model: any = null;
 	export let providerModel: unknown = null;
 	export let edit = false;
+	// "Convert to character" in the model list opens the editor with ?character=1.
+	$: startAsCharacter = edit && $pageUrl.searchParams.get('character') === '1';
 	export let admin = false;
 
 	export let preset = true;
@@ -1461,7 +1463,8 @@
 										bind:character={info.meta.character}
 										bind:lorebookIds={info.meta.lorebook_ids}
 										modelName={name}
-										sourcePrompt={system}
+										bind:sourcePrompt={system}
+										startEnabled={startAsCharacter}
 										baseModelId={info.base_model_id}
 										convertible={!(model as any)?.meta?.character}
 										modelId={edit ? (model?.id ?? null) : null}

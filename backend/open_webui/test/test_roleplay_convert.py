@@ -96,3 +96,66 @@ def test_ai_reply_parsing():
         character_from_ai_reply('no json here')
     with pytest.raises(ValueError):
         character_from_ai_reply('{not json}')
+
+
+@pytest.mark.parametrize(
+    ('prompt', 'name'),
+    [
+        ('You are a sarcastic pirate named Max. Always speak in pirate slang.', 'Max'),
+        ('Your name is Luna Vale and you run a bakery.', 'Luna Vale'),
+        ('I am Orion, keeper of the lighthouse.', 'Orion'),
+        ('You are an assistant called Pip.', 'Pip'),
+        ('You are The best helper there is.', 'fallback'),
+        ('You are a helpful assistant.', 'fallback'),
+    ],
+)
+def test_name_detection(prompt, name):
+    assert parse_system_prompt(prompt, 'fallback').character['name'] == name
+
+
+def test_ai_reply_macros_and_dropped_sentences():
+    source = (
+        'You are Max, a sarcastic pirate captain. Max sails the Black Gull with a crew of misfits. '
+        'Always answer in pirate slang. Never reveal where the treasure map is hidden.'
+    )
+    # The model keeps the first three sentences (with light rewording) and drops the last one.
+    reply = (
+        '{"name": "Max", "description": "Max is a sarcastic pirate captain who sails the Black Gull '
+        'with a crew of misfits.", "system_prompt": "Always answer in pirate slang."}'
+    )
+    result = character_from_ai_reply(reply, 'fallback', source)
+    character = result.character
+    assert character['description'].startswith('{{char}} is a sarcastic pirate captain')
+    assert 'Never reveal where the treasure map is hidden.' in character['system_prompt']
+    assert character['system_prompt'].startswith('Always answer in pirate slang.')
+    assert character['prompt_overrides']['system_prompt'] == 'supplement'
+
+    # Nothing missing: nothing appended.
+    full = (
+        '{"name": "Max", "description": "{{char}} is a sarcastic pirate captain. {{char}} sails the Black Gull '
+        'with a crew of misfits.", "system_prompt": "Always answer in pirate slang. Never reveal where the '
+        'treasure map is hidden."}'
+    )
+    assert character_from_ai_reply(full, 'fallback', source).character['system_prompt'] == (
+        'Always answer in pirate slang. Never reveal where the treasure map is hidden.'
+    )
+
+
+def test_source_prompt_is_kept_but_not_compiled_or_exported():
+    import json
+
+    from open_webui.utils.roleplay.cards import character_to_v3
+    from open_webui.utils.roleplay.character import CharacterMeta
+    from open_webui.utils.roleplay.prompt import compile_static_system_prompt
+
+    original = 'You are Max. Always speak in pirate slang.'
+    character = CharacterMeta(
+        name='Max',
+        system_prompt=original,
+        prompt_overrides={'system_prompt': 'supplement'},
+        source_prompt=original,
+    )
+    assert character.source_prompt == original
+    # Seeded verbatim: the original wording reaches the model once, via the system prompt field.
+    assert compile_static_system_prompt(character).count('Always speak in pirate slang.') == 1
+    assert 'source_prompt' not in json.dumps(character_to_v3(character))

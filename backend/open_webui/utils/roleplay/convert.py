@@ -78,6 +78,15 @@ TRAILING_CLOSING_TAG_RE = re.compile(r'\s*</\s*[A-Za-z][\w -]*>\s*$')
 YOU_ARE_RE = re.compile(
     r"^\s*(?i:you are|you're|you will play|you play|you will be)\s+([A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*){0,2})"
 )
+_PROPER_NAME = r"([A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*){0,2})"
+# "a pirate named Max", "Your name is Max", "I am Max", "Max is a ..." at the start: the name when
+# the prompt does not open with "You are <Name>".
+NAMED_RES = (
+    re.compile(rf'\b(?i:named|called)\s+{_PROPER_NAME}'),
+    re.compile(rf'\b(?i:your name is|you go by|my name is)\s+{_PROPER_NAME}'),
+    re.compile(rf"^\s*(?i:i am|i'm)\s+{_PROPER_NAME}"),
+)
+NOT_NAMES = {'I', 'You', 'The', 'A', 'An', 'This', 'Your', 'My', 'AI', 'Assistant'}
 USER_SPEAKERS = r'(?:\{\{user\}\}|user|you|human|me)'
 CHAR_SPEAKERS = r'(?:\{\{char\}\}|assistant|ai|bot|character|model)'
 
@@ -155,9 +164,14 @@ def _sections(text: str) -> tuple[str, dict[str, list[str]]]:
 def _find_name(preamble: str, sections: dict[str, str], fallback: str) -> str:
     if sections.get('name'):
         return sections['name'].split('\n')[0].strip().strip('*"\'').strip()
-    match = YOU_ARE_RE.match(preamble or sections.get('description', ''))
-    if match:
+    text = preamble or sections.get('description', '')
+    match = YOU_ARE_RE.match(text)
+    if match and match.group(1).split()[0] not in NOT_NAMES:
         return match.group(1).strip()
+    for pattern in NAMED_RES:
+        match = pattern.search(text)
+        if match and match.group(1).split()[0] not in NOT_NAMES:
+            return match.group(1).strip()
     return fallback
 
 
@@ -235,8 +249,40 @@ def ai_conversion_prompt(system: str) -> str:
     return AI_CONVERSION_PROMPT.replace('{{PROMPT}}', system)
 
 
-def character_from_ai_reply(reply: str, model_name: str = '') -> Conversion:
-    """Parse the model's JSON reply. Raises ``ValueError`` when it is not usable."""
+_WORD_RE = re.compile(r"[\w'’]+")
+_SENTENCE_RE = re.compile(r'(?<=[.!?])\s+|\n+')
+
+
+def _words(text: str) -> set[str]:
+    return {word.lower() for word in _WORD_RE.findall(text) if len(word) > 2}
+
+
+def uncovered_sentences(source: str, character: dict, name: str = '') -> list[str]:
+    """Sentences of ``source`` that the converted fields do not carry, so nothing can go missing.
+
+    A sentence counts as carried when most of its words appear somewhere in the fields; this
+    tolerates the light rewording (``{{char}}`` for the name, "you" to "{{char}}") the conversion
+    asks for, while catching sentences that were dropped.
+    """
+    carried = _words(' '.join(str(character.get(key) or '') for key in TEXT_FIELDS))
+    carried |= {'char', 'user'} | (_words(name) if name else set())
+    missing = []
+    for sentence in _SENTENCE_RE.split(source or ''):
+        sentence = sentence.strip()
+        words = _words(sentence) - {'you', 'your', 'are', 'the', 'and'}
+        if len(words) < 3:
+            continue
+        if len(words & carried) / len(words) < 0.6:
+            missing.append(sentence)
+    return missing
+
+
+def character_from_ai_reply(reply: str, model_name: str = '', source: str = '') -> Conversion:
+    """Parse the model's JSON reply. Raises ``ValueError`` when it is not usable.
+
+    With ``source`` (the prompt that was converted), sentences the model left out are appended to
+    the character system prompt rather than lost.
+    """
     start, end = reply.find('{'), reply.rfind('}')
     if start < 0 or end <= start:
         raise ValueError('The model did not return a character.')
@@ -251,6 +297,13 @@ def character_from_ai_reply(reply: str, model_name: str = '') -> Conversion:
     character['name'] = character['name'] or model_name
     if character['mes_example']:
         character['mes_example'] = _example_dialogue(character['mes_example'], character['name'])
+    for key in TEXT_FIELDS:
+        if key not in ('name', 'creator_notes'):
+            character[key] = _with_macros(character[key], character['name'])
+    missing = uncovered_sentences(source, character, character['name'])
+    if missing:
+        kept = _with_macros(' '.join(missing), character['name'])
+        character['system_prompt'] = '\n\n'.join(part for part in (character['system_prompt'], kept) if part)
     if character['system_prompt']:
         character['prompt_overrides'] = {'system_prompt': 'supplement', 'post_history': 'replace'}
     detected = [key for key in TEXT_FIELDS if key != 'name' and character[key]]

@@ -48,6 +48,10 @@ class CharacterMeta(CharacterData):
     reply_cleanup: ReplyCleanup = Field(default_factory=ReplyCleanup)
     # Remember each user across chats (see ``utils.roleplay.recall``); per user, never shared.
     recall_enabled: bool = True
+    # The plain system prompt the model had before it became a character, kept verbatim so the card
+    # can be converted (again) from it and nothing the author wrote is lost. Never sent to the model
+    # and never exported in a card.
+    source_prompt: str = ''
 
     @field_validator('expressions', mode='before')
     @classmethod

@@ -31,6 +31,8 @@
 	export let convertible = false;
 	// Set when editing a saved model: expression images are stored per model.
 	export let modelId: string | null = null;
+	// Opened from "Convert to character" in the model list: turn the switch on straight away.
+	export let startEnabled = false;
 
 	let expressionInput: HTMLInputElement;
 	let expressionsBusy = false;
@@ -85,6 +87,26 @@
 	};
 
 	let converting: 'parser' | 'ai' | null = null;
+	// The card as it was before the last conversion, so a conversion can be undone.
+	let beforeConversion: any = null;
+
+	// The prompt to convert from: the one kept on the card, else the model's current prompt (only
+	// while it is not compiled from character fields, i.e. before the model became a character).
+	$: conversionSource = (character?.source_prompt ?? '').trim()
+		? character.source_prompt
+		: convertible
+			? sourcePrompt
+			: '';
+	const CARD_TEXT_FIELDS = [
+		'description',
+		'personality',
+		'scenario',
+		'first_mes',
+		'mes_example',
+		'system_prompt',
+		'post_history_instructions',
+		'creator_notes'
+	];
 
 	$: fieldLabels = {
 		description: $i18n.t('Description'),
@@ -98,18 +120,30 @@
 	} as Record<string, string>;
 
 	const convert = async (useAi: boolean) => {
+		const source = conversionSource;
 		converting = useAi ? 'ai' : 'parser';
 		try {
 			const result = await convertSystemPromptToCharacter(localStorage.token, {
-				system: sourcePrompt,
+				system: source,
 				name: modelName,
 				base_model_id: baseModelId,
 				use_ai: useAi
 			});
-			const filled = Object.fromEntries(
-				Object.entries(result.character).filter(([, value]) => value !== '' && value !== null)
-			);
-			character = { ...withDefaults(character ?? newCharacter()), ...filled };
+			// The conversion covers the whole prompt, so it replaces the text fields (including the
+			// verbatim copy in the system prompt) instead of merging into them and duplicating text.
+			const current = withDefaults(character ?? newCharacter());
+			beforeConversion = current;
+			const converted = result.character as Record<string, any>;
+			character = {
+				...current,
+				...Object.fromEntries(CARD_TEXT_FIELDS.map((key) => [key, converted[key] ?? ''])),
+				name: converted.name || current.name,
+				prompt_overrides: {
+					...current.prompt_overrides,
+					system_prompt: converted.prompt_overrides?.system_prompt ?? 'replace'
+				},
+				source_prompt: source
+			};
 			toast.success(
 				result.detected.length
 					? $i18n.t('Filled from the system prompt: {{FIELDS}}. Review before saving.', {
@@ -124,7 +158,30 @@
 		}
 	};
 
-	const newCharacter = () => ({
+	const undoConversion = () => {
+		if (!beforeConversion) return;
+		character = beforeConversion;
+		beforeConversion = null;
+	};
+
+	// A model with a prompt becomes a character without losing it: the prompt is kept word for word
+	// as the character system prompt, added to the roleplay instructions, so the model behaves as
+	// before while the roleplay features apply. Converting then splits it into the card fields.
+	const newCharacter = () => {
+		const prompt = convertible ? sourcePrompt.trim() : '';
+		return {
+			...blankCharacter(),
+			...(prompt
+				? {
+						system_prompt: prompt,
+						prompt_overrides: { system_prompt: 'supplement', post_history: 'replace' },
+						source_prompt: prompt
+					}
+				: {})
+		};
+	};
+
+	const blankCharacter = () => ({
 		spec_version: 'owui',
 		name: modelName,
 		nickname: null,
@@ -238,13 +295,15 @@
 		}
 	};
 
-	let enabled = character !== null && character !== undefined;
+	let enabled = (character !== null && character !== undefined) || startEnabled;
 	$: setEnabled(enabled);
 
 	const setEnabled = (value: boolean) => {
 		if (value && !character) {
 			character = newCharacter();
 		} else if (!value && character) {
+			// Back to a plain model: its own prompt returns instead of the compiled character prompt.
+			if ((character.source_prompt ?? '').trim()) sourcePrompt = character.source_prompt;
 			character = null;
 		}
 	};
@@ -332,14 +391,29 @@
 	</div>
 
 	{#if enabled && character}
-		{#if convertible && sourcePrompt.trim()}
+		{#if conversionSource.trim()}
 			<div
 				class="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2 text-xs"
 			>
 				<div class="text-gray-600 dark:text-gray-400">
-					{$i18n.t('Fill the fields below from this model’s current system prompt?')}
+					{#if character.system_prompt?.trim() === conversionSource.trim()}
+						{$i18n.t(
+							'Your original prompt is kept as the character system prompt, so the model behaves as before. Split it into card fields?'
+						)}
+					{:else}
+						{$i18n.t('Fill the card fields again from the original system prompt?')}
+					{/if}
 				</div>
 				<div class="flex gap-1.5">
+					{#if beforeConversion}
+						<button
+							type="button"
+							class="px-2.5 py-1 rounded-lg bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700"
+							on:click={undoConversion}
+						>
+							{$i18n.t('Undo')}
+						</button>
+					{/if}
 					<button
 						type="button"
 						class="px-2.5 py-1 rounded-lg bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-1 disabled:opacity-50"

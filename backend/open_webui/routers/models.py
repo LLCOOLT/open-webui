@@ -1150,7 +1150,7 @@ async def _convert_with_task_model(request: Request, form_data: CharacterConvert
     reply = await run_task_prompt(
         request, user, form_data.base_model_id, ai_conversion_prompt(form_data.system), 'character_conversion'
     )
-    return character_from_ai_reply(reply, form_data.name)
+    return character_from_ai_reply(reply, form_data.name, form_data.system)
 
 
 @router.post('/characters/convert', response_model=CharacterConvertResponse)

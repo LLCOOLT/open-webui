@@ -1005,6 +1005,14 @@
 														$config?.features?.enable_character_cards
 															? (format) => exportCharacterHandler(model, format)
 															: null}
+														convertToCharacterHandler={!model.meta?.character &&
+														model.base_model_id &&
+														$config?.features?.enable_character_cards
+															? () =>
+																	goto(
+																		`/workspace/models/edit?id=${encodeURIComponent(model.id)}&character=1`
+																	)
+															: null}
 														hideHandler={() => {
 															hideModelHandler(model);
 														}}
